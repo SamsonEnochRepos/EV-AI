@@ -1,0 +1,109 @@
+# EV configuration. Every tunable lives here; no magic numbers in code.
+
+[general]
+persona_file = "config/persona.md"
+policy_file = "config/policy.toml"
+data_dir = "data"              # SQLite DB, profile, reminders (relative to repo root)
+log_dir = "logs"
+log_conversations = true       # false disables conversation logging entirely
+max_tool_steps = 5             # LLM tool-call loop cap per turn
+
+[hotkeys]
+push_to_talk = "ctrl+alt+space"
+kill_switch = "ctrl+alt+shift+k"   # not Task Manager's Ctrl+Shift+Esc
+confirm_yes = "ctrl+alt+y"
+confirm_no = "ctrl+alt+n"
+
+[trigger]
+mode = "hotkey"                # "hotkey" | "wakeword"
+wakeword_model = "hey_jarvis"  # placeholder pretrained model; see docs for custom "Hey EV"
+wakeword_threshold = 0.5
+
+[audio]
+sample_rate = 16000
+block_ms = 30
+input_device = ""              # "" = system default
+output_device = ""
+vad_aggressiveness_threshold = 0.5
+silence_ms_to_end = 550            # tuned from 700: shorter wait before EV acts; typical mid-sentence pauses are under 400 ms
+max_utterance_s = 15
+min_utterance_ms = 250
+
+[stt]
+model = "base"                 # measured: base RTF 0.23 vs small 0.65 (budget 0.5), same WER; see DECISIONS D10
+compute_type = "int8"
+device = "cpu"
+cpu_threads = 4
+language = "en"
+beam_size = 1
+
+[tts]
+engine = "piper"               # "piper" | "kokoro"
+piper_voice = "en_US-amy-medium"
+piper_voice_dir = "models/piper"
+length_scale = 1.0
+kokoro_voice = "af_heart"
+kokoro_dir = "models/kokoro"
+kokoro_speed = 1.0
+first_chunk_min_chars = 12
+
+[llm]
+host = "127.0.0.1"
+port = 11434
+model = "qwen2.5:3b"
+fallback_model = "llama3.2:latest"
+num_ctx = 2048
+temperature = 0.6
+num_predict = 220
+keep_alive = "30m"
+request_timeout_s = 60
+history_turns = 6
+think = false
+
+[vlm]
+model = "qwen2.5vl:3b"             # measured 5/5 vs moondream 2/5 on UI-reading tasks; see DECISIONS D11
+keep_alive = "0"               # unload immediately after use
+max_image_px = 768
+
+[screen]
+max_capture_px = 1280
+ocr_min_confidence = 0.5
+agent_max_steps = 8
+
+[overlay]
+enabled = true
+toolkit = "qt"                 # "qt" | "tk"
+anchor = "top-center"          # top-center|top-left|top-right|bottom-center|...
+offset_x = 0
+offset_y = 12
+monitor = 0
+width = 90
+height = 32
+bar_count = 11
+fps = 30
+fade_ms = 180
+hide_delay_ms = 600
+fill = "#111111"
+fill_alpha = 235
+border = "#3a3a3a"
+
+[memory]
+db_file = "ev.sqlite"
+profile_file = "profile.json"
+summary_every_turns = 8
+max_facts_in_prompt = 12
+chromadb_enabled = false
+
+[privacy]
+persist_audio = false
+persist_screenshots = false
+debug_save_screenshots = false
+
+[web]
+enabled = true
+max_results = 4
+timeout_s = 8
+
+[tray]
+enabled = true
+autostart = false

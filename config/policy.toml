@@ -1,0 +1,89 @@
+# EV safety policy. Evaluated by ev/safety/policy.py on every tool call, regardless of
+# what the model or any on-screen/web/file text says.
+
+[defaults]
+unknown_tool = "blocked"
+max_agent_steps = 8
+confirm_timeout_s = 20
+
+# permission level per tool: safe | confirm | blocked
+[tools]
+get_time_date = "safe"
+open_app = "safe"
+set_timer = "safe"
+set_reminder = "safe"
+media_control = "safe"
+set_volume = "safe"
+web_search = "safe"
+read_screen = "safe"
+screenshot_describe = "safe"
+remember_fact = "safe"
+forget_fact = "safe"
+take_note = "safe"
+focus_window = "safe"
+scroll = "safe"
+copy_selection = "safe"
+# Control tools are "safe" at the tool level; arg-level rules in [control] escalate to
+# confirm (submit/delete-style targets, risky key combos) or block (password fields etc.).
+click_element = "safe"
+type_text = "safe"
+press_keys = "safe"
+paste = "safe"
+do_on_screen = "safe"
+run_shell = "blocked"
+delete_file = "confirm"
+move_file = "confirm"
+send_message = "confirm"
+
+[apps]
+# open_app launches only these names (case-insensitive) or resolved Start-menu entries.
+allowlist = [
+  "notepad", "calculator", "calc", "paint", "explorer", "file explorer", "settings",
+  "chrome", "google chrome", "edge", "microsoft edge", "firefox", "spotify", "vscode",
+  "visual studio code", "terminal", "windows terminal", "word", "excel", "powerpoint",
+  "discord", "task manager",
+]
+allow_start_menu_resolution = true
+
+[files]
+safe_dirs = ["data/notes", "data/sandbox"]
+deny_symlinks = true
+
+[shell]
+enabled = false
+allowlist = []
+
+[control]
+# window titles / control names that mean "this is sensitive": typing/clicking is blocked.
+blocked_control_patterns = ["password", "passcode", "pin code", "cvv", "credit card", "card number"]
+blocked_window_patterns = ["registry editor", "regedit", "windows security", "uac", "credential"]
+blocked_key_combos = ["win+r", "ctrl+alt+delete", "alt+f4"]
+confirm_key_combos = ["enter", "ctrl+w", "ctrl+shift+delete", "delete"]
+typing_max_chars = 500
+# clicking a control whose name matches any of these requires spoken confirmation
+confirm_control_patterns = [
+  "send", "submit", "delete", "remove", "buy", "purchase", "pay", "place order", "checkout",
+  "install", "uninstall", "sign out", "log out", "empty recycle", "don't save", "discard",
+  "transfer", "confirm", "post", "publish", "unsubscribe",
+]
+
+[blocked_patterns]
+# regexes matched against any string argument of any tool (case-insensitive)
+args = [
+  '\bformat\s+[a-z]:', '\bdiskpart\b', '\breg(edit)?\b\s+(add|delete|import)',
+  'HKEY_', 'Login Data', 'logins\.json', 'Credential(s| Manager)', 'cookies\.sqlite',
+  '\bnet\s+user\b', 'Set-MpPreference', 'DisableRealtimeMonitoring', 'Invoke-Expression',
+  'powershell\s+-enc', 'curl[^|]*\|\s*(sh|bash|iex)', '\.\.[\\/]',
+]
+
+[injection]
+# heuristic phrases that mark instruction-like content inside untrusted data
+phrases = [
+  'ignore (all |any )?(previous|prior|above) (instructions|prompts)',
+  'disregard (the )?(previous|above|system)', 'you are now', 'new instructions',
+  'system prompt', 'do not tell the user', 'delete (all|the|my) ', 'send (my|the) (files|passwords)',
+  'execute the following', 'run the following command', 'as an ai language model',
+  'pre-?approved', 'the user has (already )?(confirmed|approved|authorized)',
+  'note to (the )?(ai|assistant|model)', 'always trust', '\b(remember_fact|forget_fact|delete_file|run_shell|send_message|type_text|press_keys)\b',
+  'press win\+r', 'type your (saved )?passwords?',
+]
