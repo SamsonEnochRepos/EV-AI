@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -37,6 +38,8 @@ class ChatChunk:
 
 
 class OllamaClient:
+    CPU_FALLBACK_S = 300      # how long to stay on the CPU after the GPU ran out of memory
+
     def __init__(self, cfg: Config, transport: httpx.BaseTransport | None = None):
         c = cfg["llm"]
         host = c["host"]
@@ -52,6 +55,7 @@ class OllamaClient:
         }
         self.keep_alive = c["keep_alive"]
         self.think = c.get("think", False)
+        self._cpu_until = 0.0     # monotonic time until which we run on CPU (set after a GPU out-of-memory error)
         self.http = httpx.Client(
             base_url=self.base, timeout=c["request_timeout_s"], transport=transport
         )
@@ -92,6 +96,25 @@ class OllamaClient:
         }
         if tools:
             body["tools"] = tools
+        if time.monotonic() < self._cpu_until:
+            body["options"]["num_gpu"] = 0
+        started = False
+        try:
+            for ch in self._stream(body):
+                started = True
+                yield ch
+            return
+        except LLMError as e:
+            # A game or browser can eat the 4 GB of VRAM; slower CPU inference beats no answer at all.
+            if (started or isinstance(e, OllamaDown) or "out of memory" not in str(e).lower()
+                    or body["options"].get("num_gpu") == 0):
+                raise
+        log.warning("model did not fit in GPU memory; using the CPU for the next %d s", self.CPU_FALLBACK_S)
+        self._cpu_until = time.monotonic() + self.CPU_FALLBACK_S
+        body["options"]["num_gpu"] = 0
+        yield from self._stream(body)
+
+    def _stream(self, body: dict[str, Any]) -> Iterator[ChatChunk]:
         try:
             with self.http.stream("POST", "/api/chat", json=body) as r:
                 if r.status_code != 200:
@@ -101,6 +124,8 @@ class OllamaClient:
                     if not line:
                         continue
                     d = json.loads(line)
+                    if d.get("error"):
+                        raise LLMError(f"ollama: {str(d['error'])[:200]}")
                     msg = d.get("message", {})
                     calls = [
                         ToolCall(tc["function"]["name"], _args(tc["function"].get("arguments")))

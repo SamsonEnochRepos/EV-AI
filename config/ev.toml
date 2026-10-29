@@ -15,9 +15,20 @@ confirm_yes = "ctrl+alt+y"
 confirm_no = "ctrl+alt+n"
 
 [trigger]
-mode = "hotkey"                # "hotkey" | "wakeword"
-wakeword_model = "hey_jarvis"  # placeholder pretrained model; see docs for custom "Hey EV"
+mode = "wakeword"              # "hotkey" | "wakeword" (the push-to-talk hotkey always works too)
+wakeword_model = "hey_jarvis"  # placeholder pretrained model, or a path to a custom .onnx; see docs for "Hey EV"
+wakeword_dir = "models/openwakeword"   # fetch once: python scripts/download_models.py --wakeword hey_jarvis
 wakeword_threshold = 0.5
+
+[conversation]
+followup_enabled = true        # keep listening after EV answers, no wake word / hotkey needed
+followup_window_s = 7          # how long to wait for the user to keep talking
+followup_question_window_s = 12   # longer window when EV's reply ended with a question
+followup_max_turns = 8         # safety cap on back-to-back turns per activation
+voice_interrupt = true         # talk over EV while it speaks and it stops and listens
+interrupt_min_ms = 300         # how long you must keep talking before EV stops (higher = fewer false stops)
+interrupt_margin = 2.0         # how much louder than EV's own echo you must be; raise on loud speakers
+interrupt_floor = 0.015        # absolute minimum mic level (0..1) that can count as you talking
 
 [audio]
 sample_rate = 16000
@@ -28,33 +39,38 @@ vad_aggressiveness_threshold = 0.5
 silence_ms_to_end = 550            # tuned from 700: shorter wait before EV acts; typical mid-sentence pauses are under 400 ms
 max_utterance_s = 15
 min_utterance_ms = 250
+pre_roll_ms = 480                  # audio kept from before the VAD fired; 300 risked clipping soft first words
 
 [stt]
-model = "base"                 # measured: base RTF 0.23 vs small 0.65 (budget 0.5), same WER; see DECISIONS D10
+model = "distil-small.en"       # English-only, small-class accuracy for real/accented speech; see DECISIONS D17. "base" is the faster, less accurate option (about 1.3 s quicker per turn here)
 compute_type = "int8"
 device = "cpu"
-cpu_threads = 4
+cpu_threads = 6
 language = "en"
-beam_size = 1
+beam_size = 3
+hotwords = ["Evie", "EV", "Sam", "Spotify", "Firefox", "Chrome", "Discord", "Notepad", "Ollama", "VS Code"]   # biases decoding toward words EV hears often
 
 [tts]
-engine = "piper"               # "piper" | "kokoro"
-piper_voice = "en_US-amy-medium"
+engine = "kokoro"              # "piper" | "kokoro"; kokoro is far more natural, and EV falls back to piper if it can't load
+piper_voice = "en_US-hfc_female-medium"
 piper_voice_dir = "models/piper"
 length_scale = 1.0
 kokoro_voice = "af_heart"
 kokoro_dir = "models/kokoro"
-kokoro_speed = 1.0
+kokoro_speed = 1.05            # a touch brisker than default sounds more conversational
 first_chunk_min_chars = 12
+sentence_pause_ms = 90         # short breath between sentences so replies don't run together
 
 [llm]
 host = "127.0.0.1"
 port = 11434
 model = "qwen2.5:3b"
 fallback_model = "llama3.2:latest"
-num_ctx = 2048
+num_ctx = 4096                 # persona + 20 tool schemas already need ~2k tokens; 2048 truncated the prompt
 temperature = 0.6
-num_predict = 220
+num_predict = 110              # replies are spoken, so they are short; the sentence cap below is the real limit
+reply_max_sentences = 2        # hard cap per turn unless the user asks for detail
+reply_max_sentences_detail = 6 # cap when they do ("explain in detail", "tell me a story", "walk me through")
 keep_alive = "30m"
 request_timeout_s = 60
 history_turns = 6
@@ -103,6 +119,10 @@ debug_save_screenshots = false
 enabled = true
 max_results = 4
 timeout_s = 8
+retry_pause_s = 1.5            # DuckDuckGo sometimes serves a bot check; wait this long (x attempt) before retrying
+cache_s = 600                  # repeat searches within this many seconds are answered from memory
+weather_enabled = true         # live weather via Open-Meteo (sends only the city name); false = DuckDuckGo only
+units = "metric"               # "metric" (Celsius) | "imperial" (Fahrenheit)
 
 [tray]
 enabled = true

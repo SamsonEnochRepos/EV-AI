@@ -18,6 +18,7 @@ class FastMatch:
     tool: str
     args: dict[str, Any]
     pattern: str
+    then_llm: bool = False      # run the tool, then let the LLM phrase the answer (e.g. web search results)
 
 
 def _num(s: str) -> float | None:
@@ -37,6 +38,9 @@ _UNIT = r"(hours?|hrs?|minutes?|mins?|seconds?|secs?)"
 
 # "open up to me", "start my day", "run a test": conversational, not an app name
 _CHATTY_OPEN = re.compile(r"(up|to|my|me|your|our|it|that|this|these|those|about|a|an|with|for|on|in|out|over|down|into)\b")
+
+# "look up at the stars", "search me out": not a search query
+_CHATTY_SEARCH = re.compile(r"(up|at|to|me|my|it|that|this|out|over|down|on)\b")
 
 _PRE = r"^\s*(?:(?:hey |ok(?:ay)? )?ev[, ]+)?(?:please |can you |could you |would you )?"
 _POST = r"[\s.!?]*(?:please)?[\s.!?]*$"
@@ -79,7 +83,31 @@ def match_fast(text: str) -> FastMatch | None:
         if d:
             return FastMatch("set_reminder", {"text": m.group(3), "in_minutes": d["seconds"] / 60}, "reminder_in")
 
-    m = re.search(_PRE + r"(?:open|launch|start|run)\s+(?:the )?(?:app )?([a-z0-9 .+-]{2,40}?)(?: app| application)?" + _POST, t)
+    m = re.search(
+        _PRE + r"(?:search(?: the (?:web|internet))?(?: online)?(?: for| up)?|google|look up|look online for|search up)\s+"
+        r"(.{2,120}?)" + _POST, t)
+    if m and not _CHATTY_SEARCH.match(m.group(1)):
+        return FastMatch("web_search", {"query": m.group(1).strip()}, "search", then_llm=True)
+    _day = r"(today|tomorrow|right now|now|tonight)"
+    m = re.search(
+        _PRE + r"(?:what(?:'s| is)|how(?:'s| is)|tell me|give me|check)?\s*(?:the |today'?s )?(?:weather|temperature|forecast)"
+        r"(?: like)?(?: " + _day + r")?(?: (?:in|for|at) (.{2,60}?))?(?: " + _day + r")?" + _POST, t)
+    if m:
+        args = {"day": "tomorrow" if "tomorrow" in (m.group(1), m.group(3)) else "today"}
+        if m.group(2):
+            args["place"] = m.group(2).strip()
+        return FastMatch("get_weather", args, "weather")
+
+    m = re.search(
+        _PRE + r"(?:what(?:'s| is) (?:on|in) (?:my |the )?(?:screen|display|monitor)"
+        r"|(?:see|look at|read|check|describe) (?:my |the )?(?:screen|display)"
+        r"|what am i (?:looking at|seeing)|what do you see(?: on (?:my |the )?screen)?|read (?:this|the) (?:page|window))"
+        r"(?: right now| now| for me)?" + _POST, t)
+    if m:
+        return FastMatch("read_screen", {}, "screen", then_llm=True)
+
+    m = re.search(_PRE + r"(?:open|launch|start|run)(?: up)?\s+(?:the )?(?:app )?([a-z0-9 .+-]{2,40}?)(?: app| application| browser)?"
+                  r"(?:\s+(?:in|on) (?:my |the )?(?:pc|computer|laptop|machine|system))?(?: for me)?(?: right now| now)?" + _POST, t)
     if m and not re.match(r"(a |an )?(timer|reminder)", m.group(1)) and not _CHATTY_OPEN.match(m.group(1)):
         return FastMatch("open_app", {"name": m.group(1).strip()}, "open")
 

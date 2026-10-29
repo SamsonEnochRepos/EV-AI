@@ -53,7 +53,8 @@ def speech_blocks():
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     cfg = load_config(overrides={"general": {"data_dir": str(tmp_path / "data"), "log_dir": str(tmp_path / "logs")},
-                                 "overlay": {"enabled": False}, "tray": {"enabled": False}})
+                                 "overlay": {"enabled": False}, "tray": {"enabled": False},
+                                 "conversation": {"followup_enabled": False, "voice_interrupt": False}})   # fake mic always "hears" speech
     a = EVApp(cfg)
     a.overlay.enabled = False
     from ev.audio.vad import EnergyVAD
@@ -238,3 +239,99 @@ def test_kill_switch_under_cpu_load(app):
     finally:
         for b in burners:
             b.kill()
+
+
+# ---- follow-up listening: after EV answers, the mic stays open for the next sentence (no hotkey / wake word)
+def _silence_blocks():
+    for _ in range(300):
+        yield np.zeros(480, np.int16)
+
+
+def _mic_script(monkeypatch, kinds):
+    """Each mic open yields the next kind of audio: 'speech' or 'silence' (the last kind repeats)."""
+    opened = []
+
+    def fake(cfg, stop):
+        k = kinds[min(len(opened), len(kinds) - 1)]
+        opened.append(k)
+        return speech_blocks() if k == "speech" else _silence_blocks()
+
+    monkeypatch.setattr("ev.app.mic_blocks", fake)
+    return opened
+
+
+def test_followup_turn_without_retrigger(app, monkeypatch):
+    app.cfg.raw["conversation"]["followup_enabled"] = True
+    app.cfg.raw["conversation"]["followup_window_s"] = 1
+    opened = _mic_script(monkeypatch, ["speech", "speech", "silence"])
+    heard = iter(["what time is it", "what's the date today"])
+    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    app.on_trigger()
+    assert opened == ["speech", "speech", "silence"]       # turn 1, follow-up turn, then the window times out
+    assert len(app.engine.said) == 2
+    assert app.sm.state is State.IDLE and not app._following_up
+
+
+def test_wrap_up_phrase_ends_conversation(app, monkeypatch):
+    app.cfg.raw["conversation"]["followup_enabled"] = True
+    opened = _mic_script(monkeypatch, ["speech"])
+    app.heard = "thanks"
+    use_fake_llm(app, FakeOllama([text_reply("Anytime.")]))
+    app.on_trigger()
+    assert opened == ["speech"]                            # no follow-up window after "thanks"
+    assert app.sm.state is State.IDLE
+
+
+def test_followup_turns_are_capped(app, monkeypatch):
+    app.cfg.raw["conversation"]["followup_enabled"] = True
+    app.cfg.raw["conversation"]["followup_max_turns"] = 3
+    opened = _mic_script(monkeypatch, ["speech"])
+    app.on_trigger()                                       # fake mic never goes quiet
+    assert len(opened) == 3
+    assert app.sm.state is State.IDLE
+
+
+def test_hotkey_during_followup_window_is_ignored(app):
+    app._following_up = True
+    app.on_trigger()
+    assert app.engine.said == []
+
+
+# ---- voice barge-in: the user talks over EV, speech stops, and what they say next is heard
+class FakeMonitor:
+    """Stands in for the mic monitor: fires 'user talked over EV' shortly after the reply starts."""
+
+    def __init__(self, cfg, vad, out_level, on_interrupt, blocks):
+        self.on_interrupt = on_interrupt
+        self.stopped = False
+
+    def start(self):
+        threading.Timer(0.25, lambda: self.on_interrupt([np.ones(480, np.int16)] * 3)).start()
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_talking_over_ev_stops_speech_and_listens(app, monkeypatch):
+    app.cfg.raw["conversation"].update(voice_interrupt=True, followup_window_s=1)
+    app.engine.delay = 0.2                                     # each sentence takes a while to "speak"
+    monitors = []
+    monkeypatch.setattr("ev.app.InterruptMonitor", lambda *a: monitors.append(FakeMonitor(*a)) or monitors[-1])
+    opened = _mic_script(monkeypatch, ["speech", "speech", "silence"])
+    heard = iter(["tell me a story", "actually never mind the story, what time is it"])
+    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    use_fake_llm(app, FakeOllama([text_reply("Once upon a time there was a fox. " * 8, parts=24)]))
+    app.on_trigger()
+    assert monitors and monitors[0].stopped                    # the mic was released before re-recording
+    assert opened[:2] == ["speech", "speech"]                  # story request, then the interrupting sentence
+    assert app.brain.history[-2]["content"].startswith("actually never mind") or "time" in app.brain.history[-1]["content"].lower()
+    assert app.sm.state is State.IDLE
+    spoken_story = [s for s in app.engine.said if "fox" in s]
+    assert 0 < len(spoken_story) < 8                           # the story was cut short, not read to the end
+
+
+def test_voice_interrupt_off_never_starts_monitor(app, monkeypatch):
+    started = []
+    monkeypatch.setattr("ev.app.InterruptMonitor", lambda *a: started.append(1))
+    app.on_trigger()
+    assert started == []

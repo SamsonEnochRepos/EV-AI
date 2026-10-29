@@ -59,7 +59,7 @@ class Recorder:
         self.silence_blocks = max(1, int(a["silence_ms_to_end"] / self.block_ms))
         self.max_blocks = int(a["max_utterance_s"] * 1000 / self.block_ms)
         self.min_blocks = int(a["min_utterance_ms"] / self.block_ms)
-        self.pre_roll = int(300 / self.block_ms)
+        self.pre_roll = int(a.get("pre_roll_ms", 300) / self.block_ms)   # VAD fires late; keep the clipped first syllable
         self.vad = vad
         self.on_level = on_level or (lambda _l: None)
         self.cancelled = False

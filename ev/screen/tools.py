@@ -29,7 +29,9 @@ def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client
             text = OCR.as_text(ocr.read(img))
         if not text.strip():
             return ToolResult(False, "I couldn't find any readable text on screen.")
-        return ToolResult(True, text[:3000], untrusted=True, source="screen")
+        return ToolResult(True, text[:3000], untrusted=True, source="screen",
+                          hint="Tell the user in one short casual sentence what is on their screen. "
+                               "Don't read it out word for word.")
 
     def screenshot_describe(question: str = "") -> ToolResult:
         from .vlm import VLM

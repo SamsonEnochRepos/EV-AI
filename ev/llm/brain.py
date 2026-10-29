@@ -23,7 +23,12 @@ from .spoken import spoken_text
 
 log = get_logger("brain")
 
-_TOOL_JSON = re.compile(r"\{\s*\"name\"\s*:\s*\"(\w+)\"\s*,\s*\"(?:arguments|parameters)\"\s*:\s*(\{.*?\})\s*\}", re.S)
+# When the user asks for depth, the short-reply cap is relaxed for that turn.
+_WANTS_DETAIL = re.compile(
+    r"\b(in detail|detailed|step by step|walk me through|at length|elaborate|tell me (?:a|the) story|"
+    r"tell me (?:more|everything)|explain (?:it |that |this )?(?:fully|properly|more)|longer (?:answer|version))\b", re.I)
+
+_TOOL_JSON =re.compile(r"\{\s*\"name\"\s*:\s*\"(\w+)\"\s*,\s*\"(?:arguments|parameters)\"\s*:\s*(\{.*?\})\s*\}", re.S)
 
 
 @dataclass
@@ -34,6 +39,7 @@ class TurnResult:
     timings: dict[str, float] = field(default_factory=dict)
     injection_flags: list[str] = field(default_factory=list)
     error: str = ""
+    interrupted: bool = False   # the user talked over the reply; text is only what was actually spoken
 
 
 class Brain:
@@ -56,6 +62,10 @@ class Brain:
         self.detector = InjectionDetector(gate.policy.d.get("injection", {}).get("phrases"))
         self.now = now
         self.turns = 0
+        llm = cfg["llm"]
+        self.ctx_budget = int(llm["num_ctx"]) - int(llm["num_predict"]) - 128   # leave room for the reply + template
+        self.max_sentences = int(llm.get("reply_max_sentences", 2))
+        self.max_sentences_detail = int(llm.get("reply_max_sentences_detail", 6))
 
     # ---- prompt building
     def system_prompt(self) -> str:
@@ -74,14 +84,32 @@ class Brain:
         if len(self.history) > keep * 3:
             self.history = self.history[-keep * 3:]
 
+    @staticmethod
+    def _est_tokens(obj: Any) -> int:
+        return int(len(json.dumps(obj, ensure_ascii=False)) / 3.5) + 1     # conservative for Qwen/Llama tokenizers
+
     def _messages(self, user_text: str) -> list[dict[str, Any]]:
-        return [{"role": "system", "content": self.system_prompt()}, *self.history,
-                {"role": "user", "content": user_text}]
+        """System prompt + as much recent history as fits. Ollama silently drops the *start* of an over-long
+        prompt (our system prompt and tool list), so we trim the oldest turns ourselves instead."""
+        system = {"role": "system", "content": self.system_prompt()}
+        user = {"role": "user", "content": user_text}
+        fixed = self._est_tokens([system, user]) + self._est_tokens(self.registry.schemas())
+        hist = self.history[-self.history_turns * 2:]
+        while hist and fixed + self._est_tokens(hist) > self.ctx_budget:
+            hist = hist[2:]                                                 # drop the oldest user/assistant pair
+        if fixed > self.ctx_budget:
+            log.warning("prompt (~%d tokens) exceeds the context budget (%d); raise llm.num_ctx or shorten the persona",
+                        fixed, self.ctx_budget)
+        return [system, *hist, user]
+
+    def _names_a_tool(self, sentence: str) -> bool:
+        """Small models narrate "I can use the web_search tool..."; internal tool names are never spoken."""
+        return any(n in sentence for n in self.registry.names() if "_" in n)
 
     # ---- fast path
     def try_fast(self, text: str) -> TurnResult | None:
         fm = match_fast(text)
-        if not fm or fm.tool not in self.registry.names():
+        if not fm or fm.then_llm or fm.tool not in self.registry.names():
             return None
         t0 = time.perf_counter()
         res = self._execute(fm.tool, fm.args)
@@ -92,8 +120,9 @@ class Brain:
 
     # ---- main entry
     def respond(self, user_text: str, on_sentence: Callable[[str], None] | None = None,
-                allow_fast: bool = True) -> TurnResult:
+                allow_fast: bool = True, should_stop: Callable[[], bool] | None = None) -> TurnResult:
         on_sentence = on_sentence or (lambda _s: None)
+        should_stop = should_stop or (lambda: False)
         t_start = time.perf_counter()
         if allow_fast:
             fast = self.try_fast(user_text)
@@ -104,8 +133,19 @@ class Brain:
         result = TurnResult("")
         messages = self._messages(user_text)
         schemas = self.registry.schemas()
+        forced = match_fast(user_text) if allow_fast else None
+        if forced and forced.then_llm and forced.tool in self.registry.names():
+            # explicit "search for X" / "weather in X": call the tool ourselves, then let the model phrase the answer
+            r = self._execute(forced.tool, forced.args)
+            result.tool_log.append(r)
+            result.injection_flags += r.get("flags", [])
+            messages.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"function": {"name": forced.tool, "arguments": r["args"]}}]})
+            messages.append({"role": "tool", "tool_name": forced.tool, "content": r["model_view"]})
         spoken: list[str] = []
         first_token: float | None = None
+        limit = self.max_sentences_detail if _WANTS_DETAIL.search(user_text) else self.max_sentences
+        capped = False
         try:
             for step in range(self.max_steps + 1):
                 splitter = SentenceSplitter(int(self.cfg.get("tts", "first_chunk_min_chars", 12)))
@@ -113,6 +153,8 @@ class Brain:
                 calls: list[ToolCall] = []
                 use_tools = schemas if step < self.max_steps else None
                 for ch in self.client.chat_stream(messages, tools=use_tools):
+                    if should_stop():
+                        break
                     if ch.text:
                         if first_token is None:
                             first_token = time.perf_counter() - t_start
@@ -120,18 +162,24 @@ class Brain:
                         # Only stream speech if this turn is not turning into a tool call.
                         if not calls and not _looks_like_tool_json("".join(text_parts)):
                             for s in splitter.feed(ch.text):
-                                if (s := spoken_text(s)):
+                                if len(spoken) < limit and (s := spoken_text(s)) and not self._names_a_tool(s):
                                     spoken.append(s)
                                     on_sentence(s)
+                            if len(spoken) >= limit:
+                                capped = True          # enough said; stop generating the rest
+                                break
                     calls += ch.tool_calls
+                if should_stop():
+                    result.interrupted = True
+                    break
                 full = "".join(text_parts)
                 if not calls:
                     calls = _extract_json_calls(full)
                     if calls:
                         full = ""
                 if not calls:
-                    for s in splitter.flush():
-                        if (s := spoken_text(s)):
+                    for s in ([] if capped else splitter.flush()):
+                        if (s := spoken_text(s)) and not self._names_a_tool(s):
                             spoken.append(s)
                             on_sentence(s)
                     break
@@ -146,12 +194,19 @@ class Brain:
         except LLMError as e:
             result.error = type(e).__name__
             log.error("LLM failure: %s", e)
-            msg = "I can't reach my brain right now. Is Ollama running?" if type(e).__name__ == "OllamaDown" else "Something went wrong while thinking. Let me know if you want to try again."
+            if type(e).__name__ == "OllamaDown":
+                msg = "I can't reach my brain right now. Is Ollama running?"
+            elif "out of memory" in str(e).lower():
+                msg = "I'm out of memory to think with. Closing a game or a heavy app should help."
+            else:
+                msg = "Something went wrong while thinking. Let me know if you want to try again."
             spoken = [msg]
             on_sentence(msg)
 
         text = " ".join(spoken).strip()
-        if not text and result.tool_log:
+        if result.interrupted:
+            pass
+        elif not text and result.tool_log:
             text = spoken_text(result.tool_log[-1]["message"])
             on_sentence(text)
         elif not text and not result.error:
@@ -195,7 +250,7 @@ class Brain:
         if res.untrusted:
             wrapped, flags = wrap_untrusted(res.message, res.source or name, self.detector)
             entry["flags"] = flags
-            entry["model_view"] = wrapped
+            entry["model_view"] = wrapped + (f"\n{res.hint}" if res.hint else "")
             entry["message"] = "I found some results."
         else:
             entry["model_view"] = ("OK: " if res.ok else "FAILED: ") + res.message

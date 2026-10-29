@@ -31,6 +31,6 @@ Deleting/moving files, sending messages, clicking controls named like send / sub
 | Accidental destructive action | Misheard command | Confirm class + readback; blocked patterns; sandbox paths | Misheard "yes" |
 | Mic misuse | Always-listening | Push-to-talk default; stream open only during an utterance; mute in tray; wake-word mode is opt-in (and keeps the mic open while idle by design) | In wake-word mode the mic is open locally (never stored/sent) |
 | Supply chain | Malicious package or model | Well-known packages, pinned in the lockfile, `pip-audit`, models only from Ollama library and Hugging Face with checksums recorded in `models/checksums.json` | PyPI compromise of a pinned release before audit |
-| Data exfiltration | Network egress | No telemetry; only egress is DuckDuckGo search (optional) and package/model downloads | DuckDuckGo sees the query text |
+| Data exfiltration | Network egress | No telemetry; only egress is DuckDuckGo search and Open-Meteo weather (both optional, see `[web]` in `ev.toml`) and package/model downloads | DuckDuckGo sees the query text; Open-Meteo sees only the city name |
 
 See `docs/EVAL_REPORT.md` for the security scorecard with test results.

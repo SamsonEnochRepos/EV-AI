@@ -18,6 +18,7 @@ class ToolResult:
     data: dict[str, Any] = field(default_factory=dict)
     untrusted: bool = False  # true => message is external text and must be wrapped as data
     source: str = ""
+    hint: str = ""          # system-authored guidance shown to the model beside (never inside) untrusted data
 
 
 @dataclass

@@ -2,6 +2,8 @@
 
 Piper voices come from the rhasspy/piper-voices Hugging Face repo. Whisper models are fetched
 by faster-whisper from Systran on Hugging Face on first use (or pass --whisper).
+openWakeWord models (--wakeword) come from the official dscripka/openWakeWord GitHub release, so the app
+never has to download anything at runtime.
 Ollama models are pulled with `ollama pull` (see README).
 """
 from __future__ import annotations
@@ -15,11 +17,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HF = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+OWW = "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+OWW_SHARED = ("melspectrogram", "embedding_model")   # feature extractors every wake-word model needs
+OWW_MODELS = {"alexa", "hey_mycroft", "hey_jarvis", "hey_rhasspy", "timer", "weather"}
 
 VOICES = {
     "en_US-amy-medium": "en/en_US/amy/medium",
     "en_US-lessac-medium": "en/en_US/lessac/medium",
     "en_US-kristin-medium": "en/en_US/kristin/medium",
+    "en_US-hfc_female-medium": "en/en_US/hfc_female/medium",
     "en_GB-jenny_dioco-medium": "en/en_GB/jenny_dioco/medium",
 }
 
@@ -33,8 +39,8 @@ def sha256(p: Path) -> str:
 
 
 def fetch(url: str, dest: Path) -> None:
-    if not url.startswith("https://huggingface.co/"):
-        raise ValueError("only official Hugging Face URLs are allowed")
+    if not url.startswith(("https://huggingface.co/", f"{OWW}/")):
+        raise ValueError("only official Hugging Face / openWakeWord release URLs are allowed")
     if dest.exists():
         return
     print(f"downloading {url}")
@@ -45,6 +51,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--voice", default="en_US-amy-medium", choices=sorted(VOICES))
     ap.add_argument("--whisper", nargs="*", default=[], help="e.g. base small")
+    ap.add_argument("--wakeword", nargs="*", default=[], choices=sorted(OWW_MODELS),
+                    help="openWakeWord models to fetch into models/openwakeword, e.g. hey_jarvis")
     a = ap.parse_args()
 
     out = ROOT / "models" / "piper"
@@ -57,6 +65,13 @@ def main() -> int:
     sums = json.loads(sums_path.read_text()) if sums_path.exists() else {}
     for f in out.glob(a.voice + "*"):
         sums[f"piper/{f.name}"] = sha256(f)
+
+    if a.wakeword:
+        ww = ROOT / "models" / "openwakeword"
+        ww.mkdir(parents=True, exist_ok=True)
+        for stem in (*OWW_SHARED, *(f"{m}_v0.1" for m in a.wakeword)):
+            fetch(f"{OWW}/{stem}.onnx", ww / f"{stem}.onnx")
+            sums[f"openwakeword/{stem}.onnx"] = sha256(ww / f"{stem}.onnx")
 
     for name in a.whisper:
         from faster_whisper.utils import download_model  # type: ignore[import-untyped]

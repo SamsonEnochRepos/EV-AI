@@ -6,6 +6,8 @@ import threading
 import time
 from collections.abc import Callable
 
+import numpy as np
+
 from ev.audio.playback import Player
 from ev.core.log import get_logger
 
@@ -16,9 +18,10 @@ log = get_logger("speaker")
 
 class Speaker:
     def __init__(self, engine: TTSEngine, player: Player,
-                 on_error: Callable[[Exception], None] | None = None):
+                 on_error: Callable[[Exception], None] | None = None, pause_ms: int = 0):
         self.engine = engine
         self.player = player
+        self.pause_ms = pause_ms
         self.on_error = on_error or (lambda _e: None)
         self._q: queue.Queue[str | None] = queue.Queue()
         self._gen = 0                      # bumped on stop(); stale work is discarded
@@ -85,6 +88,9 @@ class Speaker:
                         self.first_chunk_ms.append((time.perf_counter() - t0) * 1000)
                         first = False
                     self.player.play(chunk, self.engine.sample_rate)
+                if self.pause_ms and int(gen_s) == self._gen:
+                    self.player.play(np.zeros(self.engine.sample_rate * self.pause_ms // 1000, np.float32),
+                                     self.engine.sample_rate)
             except TTSError as e:
                 log.error("tts failed: %s", e)
                 self.on_error(e)

@@ -1,12 +1,17 @@
 """EV application: wires triggers, audio, STT, brain, TTS, overlay, tray into the core loop."""
 from __future__ import annotations
 
+import itertools
 import queue
+import re
 import threading
 import time
 from typing import Any
 
+import numpy as np
+
 from ev.audio.capture import MicError, Recorder, mic_blocks
+from ev.audio.interrupt import InterruptMonitor
 from ev.audio.playback import Player
 from ev.audio.trigger import Hotkeys, WakeWord
 from ev.audio.vad import make_vad
@@ -28,6 +33,11 @@ from ev.tts.base import make_engine
 from ev.tts.speaker import Speaker
 
 log = get_logger("app")
+
+# Whisper tends to invent these from room noise; in a follow-up window they mean "nobody spoke".
+_NOISE = re.compile(r"^\W*(you|bye|thanks for watching|thank you for watching)\W*$", re.I)
+# The user is wrapping up: answer, but don't keep the mic open afterwards.
+_WRAP_UP = re.compile(r"^\W*(no,? )?(thanks|thank you|that'?s all|that'?s it|nothing|nope|never ?mind|goodbye|bye|stop)\b", re.I)
 
 
 class EVApp:
@@ -55,6 +65,10 @@ class EVApp:
         self._answers: queue.Queue[bool] = queue.Queue()
         self._confirming = False
         self._abort = threading.Event()
+        self._following_up = False                        # True while the follow-up window is listening
+        self._interrupted = threading.Event()             # the user talked over EV's reply
+        self._carry: list[np.ndarray] = []                # mic blocks captured while interrupting, fed to the next recording
+        self._out_level = 0.0
         self.hotkeys = Hotkeys(cfg, {
             "push_to_talk": self.on_trigger, "kill_switch": self.kill,
             "confirm_yes": lambda: self._answers.put(True), "confirm_no": lambda: self._answers.put(False),
@@ -104,10 +118,20 @@ class EVApp:
         self.hotkeys.start()
         if self.wake:
             self.wake.start()
+            threading.Thread(target=self._report_wake, name="wake-status", daemon=True).start()
         threading.Thread(target=self._warm, name="warm", daemon=True).start()
         if self.cfg["tray"]["enabled"]:
             self._start_tray()
         log.info("EV ready in %.1fs", time.perf_counter() - t0)
+
+    def _report_wake(self) -> None:
+        assert self.wake is not None
+        for _ in range(100):                      # model load takes a moment; give up after ~20 s
+            if self.wake.ready.wait(0.2) or self.wake.error:
+                break
+        if self.wake.error:
+            self.overlay.send_state("error")
+            log.warning("wake word is off; push-to-talk (%s) still works", self.cfg["hotkeys"]["push_to_talk"])
 
     def _warm(self) -> None:
         try:
@@ -119,9 +143,17 @@ class EVApp:
     def _init_speaker(self) -> None:
         try:
             engine = make_engine(self.cfg)
-            engine.load()
+            try:
+                engine.load()
+            except Exception as e:
+                if engine.name == "piper":
+                    raise
+                log.warning("%s voice unavailable (%s); falling back to piper", engine.name, e)
+                engine = make_engine(self.cfg, "piper")
+                engine.load()
             player = Player(on_level=self._on_out_level, device=self.cfg["audio"]["output_device"] or None)
-            self.speaker = Speaker(engine, player, on_error=lambda e: log.error("speech error: %s", e))
+            self.speaker = Speaker(engine, player, on_error=lambda e: log.error("speech error: %s", e),
+                                   pause_ms=int(self.cfg.get("tts", "sentence_pause_ms", 0)))
         except Exception as e:
             log.error("TTS unavailable: %s", e)
             self.speaker = None
@@ -165,7 +197,7 @@ class EVApp:
     def _on_state(self, old: State, new: State) -> None:
         self.overlay.send_state(new.value)
         if self.wake:
-            (self.wake.pause if new not in (State.IDLE, State.PAUSED) else self.wake.resume)()
+            (self.wake.resume if new is State.IDLE else self.wake.pause)()
 
     def _on_acting(self, active: bool) -> None:
         if active:
@@ -174,6 +206,7 @@ class EVApp:
             self.sm.to(State.THINKING)
 
     def _on_out_level(self, level: float) -> None:
+        self._out_level = level
         self.overlay.send_level(level)
 
     def _on_alert(self, text: str) -> None:
@@ -282,6 +315,8 @@ class EVApp:
     def on_trigger(self) -> None:
         if self.paused or self.muted or self._confirming:
             return
+        if self._following_up:                            # already listening for the user's next sentence
+            return
         if self.speaker and self.speaker.is_speaking:     # barge-in
             self.speaker.stop()
         if not self._turn_lock.acquire(blocking=False):
@@ -289,51 +324,110 @@ class EVApp:
             return
         try:
             self._abort.clear()
-            self._one_turn()
+            self._conversation()
         except Exception:
             log.exception("turn failed")
             self.sm.to(State.ERROR, force=True)
             self.say_direct("Sorry, something broke on my end.")
         finally:
+            self._following_up = False
             self._turn_lock.release()
             if self.sm.state not in (State.SPEAKING, State.PAUSED):
                 self.sm.to(State.IDLE, force=True)
 
-    def _one_turn(self) -> None:
+    def _conversation(self) -> None:
+        """One activation: the first turn, then follow-up turns while the user keeps talking."""
+        conv = self.cfg["conversation"] if "conversation" in self.cfg.raw else {}
+        max_turns = int(conv.get("followup_max_turns", 8))
+        wait: float | None = 6.0
+        for n in range(max_turns):
+            self._following_up = n > 0
+            wait = self._one_turn(wait or 6.0, followup=n > 0)
+            if wait is None or self._abort.is_set():
+                break
+            if not self._interrupted.is_set():            # after an interruption the user is already talking
+                time.sleep(0.3)                           # let the speaker tail die so EV doesn't hear itself
+        self._following_up = False
+        if self.sm.state is State.SPEAKING:               # conversation ended right after a reply; wake word resumes on IDLE
+            self.sm.to(State.IDLE, force=True)
+
+    def _followup_wait(self, heard: str, reply: str) -> float | None:
+        """Seconds to keep listening after this reply, or None to end the conversation."""
+        conv = self.cfg.raw.get("conversation", {})
+        if not conv.get("followup_enabled", True) or _WRAP_UP.match(heard):
+            return None
+        if reply.rstrip().endswith("?"):
+            return float(conv.get("followup_question_window_s", 12))
+        return float(conv.get("followup_window_s", 7))
+
+    def _start_monitor(self) -> InterruptMonitor | None:
+        conv = self.cfg.raw.get("conversation", {})
+        if not conv.get("voice_interrupt", True) or not self.speaker:
+            return None
+        mon = InterruptMonitor(self.cfg, make_vad("silero", self.cfg["audio"]["vad_aggressiveness_threshold"]),
+                               lambda: self._out_level, self._on_talk_over, mic_blocks)
+        mon.start()
+        return mon
+
+    def _on_talk_over(self, blocks: list[np.ndarray]) -> None:
+        self._carry = blocks
+        self._interrupted.set()
+        if self.speaker:
+            self.speaker.stop()
+
+    def _one_turn(self, wait_s: float = 6.0, followup: bool = False) -> float | None:
+        """Listen, think, speak. Returns the follow-up listening window in seconds, or None if we're done."""
         self.sm.to(State.LISTENING)
+        carried, self._carry = self._carry, []
+        self._interrupted.clear()
         try:
-            audio = self.recorder.record(mic_blocks(self.cfg, lambda: False))
+            audio = self.recorder.record(itertools.chain(carried, mic_blocks(self.cfg, lambda: False)),
+                                         wait_for_speech_s=wait_s)
         except MicError:
             self.sm.to(State.ERROR, force=True)
             self.say_direct("I can't hear anything. I can't open the microphone.")
-            return
+            return None
         if audio is None or self._abort.is_set():
             self.sm.to(State.IDLE, force=True)
-            return
+            return None
         self.sm.to(State.TRANSCRIBING)
         text = self.stt.transcribe(audio).text
-        log.info("heard: %s", text)
-        if not text.strip() or self._abort.is_set():
+        log.info("heard%s: %s", " (follow-up)" if followup else "", text)
+        if not text.strip() or self._abort.is_set() or (followup and _NOISE.match(text)):
             self.sm.to(State.IDLE, force=True)
-            return
+            return None
         self.sm.to(State.THINKING)
         first = {"v": True}
+        monitor: InterruptMonitor | None = None
 
         def on_sentence(s: str) -> None:
-            if self._abort.is_set():
+            nonlocal monitor
+            if self._abort.is_set() or self._interrupted.is_set():
                 return
             if first["v"]:
                 first["v"] = False
                 self.sm.to(State.SPEAKING, force=True)
+                monitor = self._start_monitor()
             if self.speaker:
                 self.speaker.say(s)
 
         try:
-            res = self.brain.respond(text, on_sentence=on_sentence)
-            log.info("reply: %s", res.text)
-        except LLMError:
-            self.say_direct("I can't reach my brain right now.")
-            return
-        if self.speaker:
-            self.speaker.wait_done(120)
-        self.sm.to(State.IDLE, force=True)
+            try:
+                res = self.brain.respond(text, on_sentence=on_sentence,
+                                         should_stop=lambda: self._interrupted.is_set() or self._abort.is_set())
+            except LLMError:
+                self.say_direct("I can't reach my brain right now.")
+                return None
+            log.info("reply%s: %s", " (interrupted)" if self._interrupted.is_set() else "", res.text)
+            if self.speaker and not self._interrupted.is_set():
+                self.speaker.wait_done(120)               # the monitor keeps listening meanwhile and can cut this short
+        finally:
+            if monitor:
+                monitor.stop()                            # releases the mic before the recorder reopens it
+        if self._interrupted.is_set() and not self._abort.is_set():
+            log.info("interrupted by voice; listening")
+            return float(self.cfg.raw.get("conversation", {}).get("followup_window_s", 7))
+        if res.error or self._abort.is_set():
+            self.sm.to(State.IDLE, force=True)
+            return None
+        return self._followup_wait(text, res.text)

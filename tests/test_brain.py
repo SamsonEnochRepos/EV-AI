@@ -28,6 +28,23 @@ def test_plain_chat_streams_sentences(cfg, memory, policy, registry):
     assert not res.fast_path and res.timings["first_token"] > 0
 
 
+LONG = "Sure thing. It is a fun one. There is more to it. And even more after that. Plus a fifth bit."
+
+
+def test_reply_is_capped_to_two_sentences(cfg, memory, policy, registry):
+    brain, _ = make(cfg, memory, policy, registry, FakeOllama([text_reply(LONG)]))
+    spoken = []
+    res = brain.respond("how are you", on_sentence=spoken.append)
+    assert len(spoken) == 2 and res.text == " ".join(spoken)
+
+
+def test_detail_request_relaxes_the_cap(cfg, memory, policy, registry):
+    brain, _ = make(cfg, memory, policy, registry, FakeOllama([text_reply(LONG)]))
+    spoken = []
+    brain.respond("explain how you work in detail", on_sentence=spoken.append)
+    assert len(spoken) > 2
+
+
 def test_fast_path_bypasses_llm(cfg, memory, policy, registry):
     fake = FakeOllama([text_reply("should not be used")])
     brain, _ = make(cfg, memory, policy, registry, fake)

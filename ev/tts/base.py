@@ -22,8 +22,8 @@ class TTSError(RuntimeError):
     pass
 
 
-def make_engine(cfg) -> TTSEngine:  # noqa: ANN001
-    kind = cfg["tts"]["engine"]
+def make_engine(cfg, kind: str | None = None) -> TTSEngine:  # noqa: ANN001
+    kind = kind or cfg["tts"]["engine"]
     if kind == "kokoro":
         from .kokoro_engine import KokoroEngine
 

@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `ev.stt.whisper.clean_audio`, `Speaker(pause_ms=...)`, `make_engine(cfg, kind)` and tests for the reply cap and audio cleanup (`tests/test_stt_clean.py`, `tests/test_brain.py`).
+- Decision D17 in `docs/DECISIONS.md` recording the STT/TTS/reply-length changes and what was and wasn't measured.
+
+### Changed
+- `read_screen` hint now asks for one short casual sentence instead of one or two.
+- Speech recognition: default model is now `distil-small.en` (beam 3, 6 threads) instead of `base`; input audio is DC/rumble filtered and level-normalised before decoding, Whisper gets `hotwords` for EV's common vocabulary and a temperature fallback, and the pre-speech buffer grew from 300 to 480 ms (`audio.pre_roll_ms`). Costs about 1.3 s more per turn than `base`; set `stt.model = "base"` to trade back.
+- Voice: default TTS engine is Kokoro (`af_heart`, speed 1.05) with a 90 ms pause between sentences (`tts.sentence_pause_ms`); EV falls back to Piper if Kokoro can't load.
+- Replies: `llm.reply_max_sentences = 2` is now enforced in `Brain` (generation stops once reached; 6 when the user asks for detail), `num_predict` dropped from 220 to 110, and the persona's speaking rules were rewritten for a casual, answer-first voice.
+
+### Fixed
+- EV heard its own voice and answered it: the voice-interrupt detector calibrated the speaker echo before the echo reached the mic (ratio ~0), so EV's own speech counted as the user talking over it and was transcribed as the next question. Calibration now spans ~600 ms (75th percentile) and the expected echo uses the loudest playback of the last ~360 ms, which also covers the gaps between sentences.
+- Tool calling for app launches: "open **up** Claude Desktop", "... in my PC" and "... for me" now reach `open_app`; Store apps (Claude, etc.) resolve, Whisper mishearings like "Cloud" -> "Claude" are corrected as a second guess, an exact name always beats a loose match (no more "cloud" -> Genshin Impact Cloud), and fuzzy matching no longer turns "photoshop" into Photos.
+- EV no longer speaks sentences that name internal tools ("I can use the web_search tool..."), and the persona stops it claiming it can't open apps or see the screen.
+- Web search: results are cached for ten minutes and retried with longer spacing when DuckDuckGo serves its bot check.
+- Wake word never started: `trigger.mode` was `hotkey` and `openwakeword` was not installed. The listener now loads its models offline from `models/openwakeword/` (fetch with `python scripts/download_models.py --wakeword hey_jarvis`), releases the mic before the turn starts, stays paused for the whole turn, and degrades to hotkey-only with a clear log line if the model is missing.
+- Prompt overflow: persona + 20 tool schemas used ~1900 of `num_ctx = 2048` tokens, so Ollama silently truncated the system prompt/tools on later turns (lost context, tools stopped being called). `num_ctx` is now 4096 and `Brain` trims history to the context budget and honours `llm.history_turns`.
+- `open_app` failed with `WinError 2` for Chrome/Firefox/Edge (registered in App Paths, not on PATH). Executables are now resolved via PATH, App Paths, Start-menu shortcuts (fuzzy, never uninstallers) and Store apps; "for me"/"browser" suffixes are trimmed.
+- Web search: DuckDuckGo's intermittent bot-check ("No results found") is retried, falls back to news, and reports honestly when the service is unavailable. Explicit searches and weather requests call `web_search` deterministically, and the result carries a system-authored hint that stops the model inventing details.
+- GPU out-of-memory from Ollama now retries on CPU for five minutes, and EV says it is out of memory instead of "something went wrong".
+
+### Changed
+- Evie's voice is now the Piper voice `en_US-hfc_female-medium` (`tts.piper_voice` in `config/ev.toml`); the voice is also listed in `scripts/download_models.py`. Its training data is CC BY-NC-SA 4.0 (non-commercial).
+
+### Added
+- `get_weather` tool (`ev/tools/weather.py`): live conditions and tomorrow's forecast from Open-Meteo, answered directly without the LLM. DuckDuckGo snippets only describe weather sites, so web search could never answer "what's the weather". Sends only the city name; switch off with `[web] weather_enabled = false`. A saved `city`/`location` fact is used when no place is spoken.
+- Fast-path routing for screen questions ("can you see my screen", "what's on my screen") to `read_screen`.
+- Voice barge-in (`ev/audio/interrupt.py`): talk over EV while it speaks and it stops mid-sentence, stops generating, and listens to what you say next. An echo-aware detector learns how loud EV's own voice leaks into the mic so speakers don't self-interrupt; tune with `voice_interrupt`, `interrupt_min_ms`, `interrupt_margin`, `interrupt_floor` in `[conversation]`. EV remembers only the part of the reply it actually said.
+- Follow-up listening (`[conversation]` in `config/ev.toml`): after EV answers it keeps listening without a wake word or hotkey, for longer if its reply was a question. "Thanks", "that's all", "never mind" end the conversation.
 - Project skeleton for EV, a local voice-first assistant: `pyproject.toml`, `Makefile`, `start_ev.bat`, and the `ev/` package (core, audio, stt, tts, llm, tools, screen, control, memory, overlay, safety, evals).
 - Config files: `config/ev.toml`, `config/persona.md`, `config/policy.toml`.
 - Core: config loader, redacting file logger, event bus, state machine.

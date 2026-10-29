@@ -75,7 +75,9 @@ in `policy.toml` to relax.
 ## D8. Wake word
 openWakeWord has no pretrained "Hey EV". Push-to-talk is the default. Wake word is an optional,
 pluggable listener (`trigger.mode = "wakeword"`, `wakeword_model`), defaulting to the placeholder
-`hey_jarvis`. See README for training a custom model.
+`hey_jarvis`. See README for training a custom model. Models live in `models/openwakeword/` and are
+fetched once by `scripts/download_models.py --wakeword`; nothing is downloaded at runtime. The push-to-talk
+hotkey keeps working in wake-word mode.
 
 ## D9. Vector memory
 SQLite facts + rolling summary only. ChromaDB would cost hundreds of MB of RAM on an 8 GB machine.
@@ -134,3 +136,16 @@ Persona pass rates in the report are for what EV would actually say, not raw mod
 ## D16. Git
 `git init` was run and `.gitignore` written, but **nothing has been committed**: the housekeeping hook configured for this
 workspace says not to commit. Suggested phase commits are listed at the end of `docs/PROGRESS.md`.
+
+## D17. Real-use fixes: STT model, Kokoro voice, reply length
+Live testing showed mishearing, a robotic voice and long replies. Changes, with what was and was not measured:
+* **STT**: `distil-small.en`, beam 3. On this CPU (20 synthetic utterances, `evals/stt_eval.py` clips) RTF was base 0.25,
+  small 0.8, distil-small.en 0.65. WER was about 11% for all of them, so **this benchmark cannot show the accuracy gain**
+  (same caveat as D10: synthetic single-voice speech). The choice rests on `small`-class models being known to handle accents
+  and noise better than `base`, not on a measurement here. Whisper encodes a fixed 30 s window, so cost is roughly
+  per-utterance, not per-second. Roll back with `stt.model = "base"`.
+* **TTS**: Kokoro was already installed. Steady-state RTF about 0.44 vs Piper 0.09, so the first sentence starts about 1 s
+  later; it is warmed up at load and `app.py` falls back to Piper if it fails.
+* **Length**: the 3B model ignored "one to three sentences", so `Brain` now stops generation at `llm.reply_max_sentences`.
+  Persona eval after the rewrite: 30/30 deterministic, judge mean 4.69/5.
+

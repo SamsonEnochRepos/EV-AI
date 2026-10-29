@@ -36,6 +36,10 @@ class KokoroEngine:
         except ImportError as e:
             raise TTSError("kokoro-onnx is not installed (pip install kokoro-onnx)") from e
         self._k = Kokoro(str(model), str(voices))
+        try:
+            self._k.create("Hi.", voice=self.voice, speed=self.speed, lang="en-us")   # first call is ~3x slower
+        except Exception as e:
+            log.warning("kokoro warm-up failed: %s", e)
 
     def synthesize(self, text: str) -> Iterator[np.ndarray]:
         self.load()

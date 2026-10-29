@@ -31,6 +31,8 @@ from ev.llm.sentences import SentenceSplitter
     ("paste it in", "paste", {}),
     ("forget my dog's name", "forget_fact", {"key": "dog's name"}),
     ("forget my favorite color", "forget_fact", {"key": "favorite color"}),
+    ("what's the weather like", "get_weather", {"day": "today"}),
+    ("would you open up Claude Desktop", "open_app", {"name": "claude desktop"}),
 ])
 def test_fast_matches(text, tool, args):
     m = match_fast(text)
@@ -39,7 +41,7 @@ def test_fast_matches(text, tool, args):
 
 
 @pytest.mark.parametrize("text", [
-    "how are you today", "tell me a joke", "what's the weather like", "open up to me about your day",
+    "how are you today", "tell me a joke", "open up to me about your day",
     "who won the game", "set a timer", "play something by Daft Punk",
     "it's too loud outside, let's go for a walk", "I can't hear the birds today",
     "delete my temp file", "remove my old notes", "forget it", "forget about it", "forget what I said", "delete my files", "delete everything", "forget the whole thing",
