@@ -12,7 +12,9 @@ from ev.core.config import Config
 _debug_files: list[Path] = []
 
 
-def grab(cfg: Config, monitor: int = 1, region: tuple[int, int, int, int] | None = None) -> Image.Image:
+def grab(cfg: Config, monitor: int = 1, region: tuple[int, int, int, int] | None = None,
+         full: bool = False) -> Image.Image:
+    """Capture the screen. full=True keeps native resolution (for screenshots the user asked to keep)."""
     import mss
 
     with mss.mss() as sct:
@@ -20,6 +22,8 @@ def grab(cfg: Config, monitor: int = 1, region: tuple[int, int, int, int] | None
             "left": region[0], "top": region[1], "width": region[2], "height": region[3]}
         shot = sct.grab(mon)
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    if full:
+        return img
     img = downscale(img, int(cfg["screen"]["max_capture_px"]))
     _maybe_debug_save(cfg, img)
     return img

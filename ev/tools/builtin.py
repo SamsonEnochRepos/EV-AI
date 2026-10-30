@@ -13,7 +13,7 @@ from ev.core.config import Config
 from ev.memory.store import MemoryStore
 from ev.safety.policy import Policy
 
-from . import system, weather
+from . import system, weather, web, windows
 from .base import Tool, ToolRegistry, ToolResult
 from .scheduler import Scheduler
 
@@ -47,14 +47,70 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         n = ctx.now()
         return ToolResult(True, n.strftime("It's %I:%M %p on %A, %B %d, %Y").replace(" 0", " "))
 
-    def open_app(name: str) -> ToolResult:
+    def open_app(name: str, admin: bool = False) -> ToolResult:
         try:
-            launched = system.launch_app(name, ctx.policy.start_menu)
+            launched = system.launch_app(name, ctx.policy.start_menu, elevate=admin)
+        except FileNotFoundError as e:
+            return ToolResult(False, str(e))
+        except PermissionError as e:
+            return ToolResult(False, f"I couldn't start {name} as administrator: {e}.")
+        except OSError as e:
+            return ToolResult(False, f"I couldn't start {name}: {e.strerror or type(e).__name__}.")
+        return ToolResult(True, f"Opened {launched}" + (" as administrator." if admin else "."))
+
+    def open_website(site: str = "", query: str = "", url: str = "", browser: str = "") -> ToolResult:
+        target = web.build_url(site, query, url)
+        if target is None:
+            return ToolResult(False, "That doesn't look like a website I can open.")
+        try:
+            web.open_url(target, browser)
         except FileNotFoundError as e:
             return ToolResult(False, str(e))
         except OSError as e:
-            return ToolResult(False, f"I couldn't start {name}: {e.strerror or type(e).__name__}.")
-        return ToolResult(True, f"Opened {launched}.")
+            return ToolResult(False, f"I couldn't open the browser: {e.strerror or type(e).__name__}.")
+        label = _SITE_LABELS.get(web.canonical_site(site), web.host_of(target).removeprefix("www."))
+        where = f" in {browser}" if browser else ""
+        if query.strip() and not url:
+            return ToolResult(True, f"Searched {label} for {query.strip()}{where}.")
+        return ToolResult(True, f"Opened {label}{where}.")
+
+    def close_app(name: str, force: bool = False) -> ToolResult:
+        try:
+            wins = windows.list_windows()
+            fg = windows.foreground()
+        except OSError as e:
+            return ToolResult(False, f"I can't close windows here: {e}")
+        key = name.strip().lower()
+        this = key in windows.THIS_WINDOW
+        found = ([fg] if fg else []) if this else windows.match(name, wins)
+        label = "that window" if this else name
+        own = windows.own_pids()
+        ours = [w for w in found if w.pid in own]
+        guarded = [w for w in found if w.exe.replace("-", "") in ctx.policy.protected_apps]
+        target = [w for w in found if w not in ours and w not in guarded]
+        if not target:
+            if ours:
+                return ToolResult(False, "That's the window I'm running in, so I'm leaving it open.")
+            if guarded:
+                return ToolResult(False, f"I won't close {label}; Windows or EV depends on it.")
+            stems = windows.stems_for(name)
+            hidden = [] if this else windows.running_pids(stems - ctx.policy.protected_apps, own)
+            if hidden:
+                return ToolResult(False, f"{label} is running in the background with no window. "
+                                         "I can force close it if you say so.")
+            return ToolResult(False, f"I don't see {label} open.")
+        if force:
+            ended, refused = windows.terminate(sorted({w.pid for w in target}))
+            if refused and not ended:
+                return ToolResult(False, f"{label} is running as administrator, so I can't force it closed.")
+            return ToolResult(True, f"Force closed {label}.")
+        refused_wins = [w for w in target if not windows.request_close(w)]
+        if len(refused_wins) == len(target):
+            return ToolResult(False, f"{label} is running as administrator, so I can't close it without admin rights.")
+        left = windows.wait_gone([w for w in target if w not in refused_wins])
+        if left:
+            return ToolResult(False, f"I asked {label} to close, but it's still open. It may be asking to save something.")
+        return ToolResult(True, f"Closed {label}.")
 
     def set_timer(minutes: float = 0, seconds: int = 0, label: str = "") -> ToolResult:
         total = int(round(minutes * 60 + seconds))
@@ -166,9 +222,20 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
 
     S = "string"
     reg.register(Tool("get_time_date", "Get the current time and date.", {}, get_time_date))
-    reg.register(Tool("open_app", "Open an application by name.",
-                      {"name": {"type": S, "description": "App name, e.g. Spotify", "maxLength": 60}},
-                      open_app, ("name",)))
+    reg.register(Tool("open_app", "Open an application by name. admin only if asked for administrator rights.",
+                      {"name": {"type": S, "description": "App name, e.g. Spotify", "maxLength": 60},
+                       "admin": {"type": "boolean"}},
+                      open_app, ("name",), timeout_s=20))
+    reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one.",
+                      {"site": {"type": S, "description": "youtube, github, a domain...", "maxLength": 60},
+                       "query": {"type": S, "maxLength": 200},
+                       "url": {"type": S, "description": "only if the user gave an address", "maxLength": 500},
+                       "browser": {"type": S, "maxLength": 20}},
+                      open_website, timeout_s=15))
+    reg.register(Tool("close_app", "Close an app by name, or 'this' for the front window. force only for force quit or kill.",
+                      {"name": {"type": S, "maxLength": 60},
+                       "force": {"type": "boolean"}},
+                      close_app, ("name",), timeout_s=15))
     reg.register(Tool("set_timer", "Start a countdown timer.", {
         "minutes": {"type": "number", "minimum": 0, "maximum": 1440},
         "seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
@@ -196,6 +263,11 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
     reg.register(Tool("take_note", "Save a quick note for the user.",
                       {"text": {"type": S, "maxLength": 1000}}, take_note, ("text",)))
     return reg
+
+
+_SITE_LABELS = {"youtube": "YouTube", "github": "GitHub", "gmail": "Gmail", "linkedin": "LinkedIn", "maps": "Google Maps",
+                "stackoverflow": "Stack Overflow", "duckduckgo": "DuckDuckGo", "twitter": "X", "google": "Google",
+                "wikipedia": "Wikipedia", "reddit": "Reddit", "amazon": "Amazon"}
 
 
 def _first_rows(attempts: list[Callable[[Any], Any]], make_client: Callable[[], Any], pause_s: float = 1.0

@@ -9,7 +9,11 @@ confirm_timeout_s = 20
 # permission level per tool: safe | confirm | blocked
 [tools]
 get_time_date = "safe"
-open_app = "safe"
+open_app = "safe"             # admin=true (run as administrator) always escalates to confirm; see policy.py
+close_app = "safe"            # polite close only; force=true escalates to confirm, protected apps are blocked
+open_website = "safe"         # public https sites only; unfamiliar links that carry a query string escalate to confirm
+take_screenshot = "safe"
+set_display_mode = "safe"     # toggles the on-screen text card; touches nothing but EV's own overlay
 set_timer = "safe"
 set_reminder = "safe"
 media_control = "safe"
@@ -46,6 +50,21 @@ allowlist = [
 ]
 allow_start_menu_resolution = true
 
+# Never closed by close_app, however it is asked: Windows itself, security software, and EV's own brain.
+# (EV's own process and the terminal it runs in are also excluded at run time.)
+protected = [
+  "system", "csrss", "wininit", "winlogon", "services", "lsass", "smss", "svchost", "dwm", "fontdrvhost",
+  "taskhostw", "sihost", "ctfmon", "runtimebroker", "searchhost", "startmenuexperiencehost", "shellexperiencehost",
+  "textinputhost", "registry", "msmpeng", "securityhealthservice", "securityhealthsystray", "windows security",
+  "windows defender", "defender", "ollama", "ollama app",
+]
+no_force = ["explorer", "file explorer", "taskmgr", "task manager"]   # fine to close politely, never kill
+
+[web]
+# open_website opens these (and their subdomains) without asking, besides the built-in sites (YouTube, Google, GitHub...).
+# Any other address needs a spoken yes, because data can be smuggled out in a hostname or path. Add sites you use a lot.
+trusted_hosts = []
+
 [files]
 safe_dirs = ["data/notes", "data/sandbox"]
 deny_symlinks = true
@@ -65,8 +84,14 @@ typing_max_chars = 500
 confirm_control_patterns = [
   "send", "submit", "delete", "remove", "buy", "purchase", "pay", "place order", "checkout",
   "install", "uninstall", "sign out", "log out", "empty recycle", "don't save", "discard",
-  "transfer", "confirm", "post", "publish", "unsubscribe",
+  "transfer", "confirm", "post", "publish", "unsubscribe", "administrator", "run as",
 ]
+
+[confirm_patterns]
+# Anything that smells like administrator rights needs a spoken yes first, whatever the tool or who suggested it.
+# EV never elevates by itself: an approved "as administrator" launch still goes through Windows' own UAC prompt.
+tools = ["open_app", "open_website", "close_app", "click_element", "focus_window", "do_on_screen"]
+args = ['\badmin(istrator|istrative)?\b', '\brun ?as\b', '\belevat(e|ed|ion)\b', '\bsudo\b', '\bsuper ?user\b', '\broot access\b']
 
 [blocked_patterns]
 # regexes matched against any string argument of any tool (case-insensitive)
@@ -85,6 +110,6 @@ phrases = [
   'system prompt', 'do not tell the user', 'delete (all|the|my) ', 'send (my|the) (files|passwords)',
   'execute the following', 'run the following command', 'as an ai language model',
   'pre-?approved', 'the user has (already )?(confirmed|approved|authorized)',
-  'note to (the )?(ai|assistant|model)', 'always trust', '\b(remember_fact|forget_fact|delete_file|run_shell|send_message|type_text|press_keys)\b',
+  'note to (the )?(ai|assistant|model)', 'always trust', '\b(remember_fact|forget_fact|delete_file|run_shell|send_message|type_text|press_keys|close_app|open_website)\b',
   'press win\+r', 'type your (saved )?passwords?',
 ]

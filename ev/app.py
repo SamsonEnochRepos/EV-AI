@@ -53,6 +53,11 @@ class EVApp:
         self.client = OllamaClient(cfg)
         self.scheduler = Scheduler(self.memory, self._on_alert)
         self.registry: ToolRegistry = build_tools(ToolContext(cfg, self.memory, self.scheduler, self.policy))
+        # display mode: the pill shows a text card with what the user said and what EV answers
+        self.display_mode = self.memory.get_kv("display_mode", "1" if cfg["overlay"].get("display_mode") else "0") == "1"
+        self._last_heard = ""
+        self.overlay.send_display(self.display_mode)
+        self._register_display_tool()
         self._register_screen_tools()
         self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting)
         self.stt = STT(cfg)
@@ -88,6 +93,28 @@ class EVApp:
             self._register_agent_tool()
         except Exception:
             log.exception("screen/control tools unavailable")
+
+    def _register_display_tool(self) -> None:
+        from ev.tools.base import Tool, ToolResult
+
+        def set_display_mode(enabled: bool) -> ToolResult:
+            if enabled == self.display_mode:
+                return ToolResult(True, f"Display mode is already {'on' if enabled else 'off'}.")
+            self.display_mode = enabled
+            self.memory.set_kv("display_mode", "1" if enabled else "0")
+            self.overlay.send_display(enabled)
+            if enabled and self._last_heard:
+                self.overlay.send_text("user", self._last_heard)       # show the command that turned it on
+            return ToolResult(True, "Display mode on." if enabled else "Display mode off.")
+
+        self.registry.register(Tool(
+            "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
+            {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",)))
+
+    def _show(self, who: str, text: str, append: bool = False) -> None:
+        """Put a line of the conversation on the pill's text card (only does anything in display mode)."""
+        if self.display_mode:
+            self.overlay.send_text(who, text, append)
 
     def _register_agent_tool(self) -> None:
         from ev.control.agent import ScreenAgent
@@ -221,6 +248,7 @@ class EVApp:
             return
         if self.sm.state in (State.IDLE, State.SPEAKING):
             self.sm.to(State.SPEAKING)
+        self._show("ev", text)
         self.speaker.say(text)
         threading.Thread(target=self._finish_speaking, daemon=True).start()
 
@@ -246,7 +274,9 @@ class EVApp:
                 try:
                     audio = self.recorder.record(mic_blocks(self.cfg, stop.is_set), wait_for_speech_s=timeout)
                     if audio is not None and not stop.is_set():
-                        ans = parse_yes_no(self.stt.transcribe(audio).text)
+                        said = self.stt.transcribe(audio).text
+                        self._show("user", said)
+                        ans = parse_yes_no(said)
                         if ans is not None:
                             self._answers.put(ans)
                 except MicError:
@@ -396,6 +426,8 @@ class EVApp:
         if not text.strip() or self._abort.is_set() or (followup and _NOISE.match(text)):
             self.sm.to(State.IDLE, force=True)
             return None
+        self._last_heard = text
+        self._show("user", text)
         self.sm.to(State.THINKING)
         first = {"v": True}
         monitor: InterruptMonitor | None = None
@@ -408,6 +440,7 @@ class EVApp:
                 first["v"] = False
                 self.sm.to(State.SPEAKING, force=True)
                 monitor = self._start_monitor()
+            self._show("ev", s, append=True)
             if self.speaker:
                 self.speaker.say(s)
 

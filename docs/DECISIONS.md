@@ -135,7 +135,7 @@ Persona pass rates in the report are for what EV would actually say, not raw mod
 
 ## D16. Git
 `git init` was run and `.gitignore` written, but **nothing has been committed**: the housekeeping hook configured for this
-workspace says not to commit. Suggested phase commits are listed at the end of `docs/PROGRESS.md`.
+workspace says not to commit.
 
 ## D17. Real-use fixes: STT model, Kokoro voice, reply length
 Live testing showed mishearing, a robotic voice and long replies. Changes, with what was and was not measured:
@@ -148,4 +148,20 @@ Live testing showed mishearing, a robotic voice and long replies. Changes, with 
   later; it is warmed up at load and `app.py` falls back to Piper if it fails.
 * **Length**: the 3B model ignored "one to three sentences", so `Brain` now stops generation at `llm.reply_max_sentences`.
   Persona eval after the rewrite: 30/30 deterministic, judge mean 4.69/5.
+
+## D18. Closing apps, websites, screenshots, administrator rights
+* **Ask only for what is risky.** `close_app` (polite), `open_website` and `take_screenshot` are `safe`. Force-closing, anything mentioning administrator rights, and any address that isn't a known or trusted site (an automated review showed that gating only `?`/`#` missed data in hostnames and paths) escalates to confirm in `policy.py`; protected processes are blocked. All of it is decided from config and arguments, never from model or screen text.
+* **Why `open_website` and not clicking.** "Open YouTube and search X" through the screen agent is 4-6 model steps of clicking; building the search URL is one deterministic call. `build_url` is a pure function the policy also calls, so the policy judges the exact URL that would open. Its first version crashed the policy on `javascript:alert(1)` (found by a test); it now rejects non-web schemes and never raises.
+* **Polite close.** `WM_CLOSE` to every window of the app (same as the X button). Browser tabs never match by title, so "close YouTube" can't shut the whole browser. EV's own process, its terminal and its Python helpers are skipped; apps EV launched are not, which a live test showed (EV started Notepad as a child process and then refused to close it).
+* **Not built:** a `delete_file` tool. The policy still lists `delete_file`, `move_file` and `send_message` as `confirm`, but nothing registers them, so EV cannot delete or send anything yet.
+* **Measured:** 307+ unit tests, security suite 96/96 with 0 bypasses, intent eval 62/72 (4 of 6 new phrasings route to the right tool on `qwen2.5:3b`; "get rid of the Notepad window" and "pull up the Rust subreddit on Reddit" got a text reply instead of a tool call). Persona eval is 29-30/30 and varies run to run on a 3B model.
+
+## D19. Display mode (text card on the pill)
+* **One window, not two.** The card is drawn by the existing pill widget (the window just gets taller), so it shares the pill's fade, always-on-top, click-through and no-focus behaviour. The pill stays where it is; the toolkit-independent model is `overlay/display.py`.
+* **Only while on.** The core sends transcript text to the overlay only in display mode, and the overlay keeps just the latest exchange in memory. Nothing is written to disk.
+* **What it shows.** The user's line appears after transcription (Whisper runs on the finished utterance, so there are no live partial words), and EV's reply is added sentence by sentence as each is queued for speech; an interrupted reply shows only what was spoken. Confirmation prompts and agent narration appear too.
+* **Tried and removed: hiding the card from screen capture.** The idea was to keep EV's OCR and screenshots from reading its own transcript. `SetWindowDisplayAffinity` fails on the pill (error 8, even in monitor mode; probably because it is a layered, translucent window, not confirmed) and the card showed up in captures. It was removed rather than shipped as a no-op. Consequence: in display mode, `screenshot_describe` and OCR-based `read_screen` can see the card. UI Automation reads, the default, only see the foreground window.
+
+## D20. Voice barge-in on speakers: model the echo, don't compare levels
+Recording EV speaking through laptop speakers while the mic listened (nobody talking): mic rms 0.02-0.05 while EV talks (a person at the mic is about 0.05-0.1), arriving about 480 ms after the playback meter, envelope correlation 0.88 once aligned. The first detector compared mic level to playback level at the same instant and calibrated in the first 600 ms, before the echo arrived (ratio 0.009), so it fired on 2 of 3 recordings. The replacement estimates the delay by cross-correlation, predicts echo as gain x playback delayed by that amount (gain = 75th percentile of recent samples, frozen while a possible interruption is in progress), and arms only after 1.2 s of playback. Margin 1.5 was chosen from a grid over margin and gain percentile: the longest false "suspect" run on real echo was 5 of the 10 blocks needed to fire, and simulated talk-over at 0.08 rms or louder was detected in every trial (median 0.4-0.7 s). **Limits:** the user's voice is simulated by adding a modulated tone to real echo levels, not recorded; a quiet voice (0.06) is caught in about 4 of 6 trials; without echo cancellation, a quiet talker over loud speakers cannot be told from EV's own voice. Headphones remove the problem. If EV still cuts itself off, raise `interrupt_margin` or set `voice_interrupt = false`.
 

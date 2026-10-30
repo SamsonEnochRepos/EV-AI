@@ -22,7 +22,7 @@ from .datasets import INTENT, PERSONA
 
 ALL_TOOL_NAMES = ["get_time_date", "open_app", "set_timer", "set_reminder", "media_control", "set_volume",
                   "web_search", "remember_fact", "forget_fact", "take_note", "read_screen", "click_element",
-                  "type_text", "press_keys", "scroll", "focus_window", "copy_selection", "paste", "do_on_screen"]
+                  "type_text", "press_keys", "scroll", "focus_window", "copy_selection", "paste", "do_on_screen", "close_app", "open_website", "take_screenshot"]
 
 
 def make_recording_brain(cfg: Config, model: str | None = None, ask=None) -> tuple[Brain, list[dict[str, Any]], MemoryStore]:  # noqa: ANN001
@@ -51,6 +51,7 @@ def make_recording_brain(cfg: Config, model: str | None = None, ask=None) -> tup
         "focus_window": ({"title": {"type": "string"}}, ("title",), "Bring a window to the front by part of its title."),
         "copy_selection": ({}, (), "Copy the current selection."),
         "paste": ({}, (), "Paste the clipboard."),
+        "take_screenshot": ({}, (), "Take a screenshot of the screen and save it as an image file for the user."),
         "do_on_screen": ({"goal": {"type": "string"}}, ("goal",), "Carry out a multi-step task on screen, like opening an app and typing in it."),
     }
     for n, (params, req, desc) in extra.items():

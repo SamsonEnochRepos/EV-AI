@@ -80,5 +80,11 @@ class SafetyGate:
 
 
 def default_describe(tool: str, args: dict[str, Any]) -> str:
+    if tool == "close_app" and args.get("force"):
+        return f"force close {args.get('name', 'that app')}. Anything unsaved in it will be lost"
+    if tool == "open_app" and args.get("admin"):
+        return f"open {args.get('name', 'that app')} as administrator"
+    if tool == "open_website":
+        return "open " + (args.get("url") or f"{args.get('site', 'a website')} searching for {args.get('query')}")
     bits = ", ".join(f"{k} {v}" for k, v in args.items())
     return f"{tool.replace('_', ' ')}" + (f" with {bits}" if bits else "")

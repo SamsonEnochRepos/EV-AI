@@ -335,3 +335,57 @@ def test_voice_interrupt_off_never_starts_monitor(app, monkeypatch):
     monkeypatch.setattr("ev.app.InterruptMonitor", lambda *a: started.append(1))
     app.on_trigger()
     assert started == []
+
+
+class RecordingOverlay:
+    """Stands in for the overlay process and records everything EV tells it."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return lambda *a, **k: self.calls.append((name, *a))
+
+
+def test_display_mode_by_voice_shows_both_sides_of_the_conversation(app):
+    app.overlay = RecordingOverlay()
+    app.heard = "activate display mode"
+    app.on_trigger()
+    assert app.display_mode and app.memory.get_kv("display_mode") == "1"
+    assert ("send_display", True) in app.overlay.calls
+    assert ("send_text", "user", "activate display mode") in app.overlay.calls       # the command itself is shown too
+    assert ("send_text", "ev", "Display mode on.", True) in app.overlay.calls
+
+    app.overlay.calls.clear()
+    app.heard = "what time is it"
+    app.on_trigger()
+    texts = [c for c in app.overlay.calls if c[0] == "send_text"]
+    assert texts[0] == ("send_text", "user", "what time is it", False)
+    assert texts[1][:2] == ("send_text", "ev") and texts[1][3] is True
+
+
+def test_deactivating_display_mode_stops_sending_text(app):
+    app.overlay = RecordingOverlay()
+    app.display_mode = True
+    app.heard = "deactivate display mode"
+    app.on_trigger()
+    assert not app.display_mode and app.memory.get_kv("display_mode") == "0"
+    assert ("send_display", False) in app.overlay.calls
+    app.overlay.calls.clear()
+    app.heard = "what time is it"
+    app.on_trigger()
+    assert not [c for c in app.overlay.calls if c[0] == "send_text"]
+
+
+def test_display_mode_is_off_by_default_and_remembered(app, tmp_path):
+    assert app.display_mode is False
+    app.memory.set_kv("display_mode", "1")
+    from ev.app import EVApp
+    from ev.core.config import load_config
+
+    again = EVApp(load_config(overrides={"general": {"data_dir": str(tmp_path / "data"), "log_dir": str(tmp_path / "logs")},
+                                         "overlay": {"enabled": False}, "tray": {"enabled": False}}))
+    try:
+        assert again.display_mode is True
+    finally:
+        again.shutdown()

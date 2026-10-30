@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 data/
+!tests/data/
 logs/
 models/
 config/ev.local.toml
@@ -38,3 +39,4 @@ scripts/conda_*.log
 scripts/kokoro_install.log
 scripts/pip_audit.log
 .claude/settings.local.json
+.ipynb_checkpoints/

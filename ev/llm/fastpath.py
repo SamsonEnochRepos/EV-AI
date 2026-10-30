@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ev.tools.web import BROWSERS, SITE_ALIASES, SITES
+
 _NUM_WORDS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "twenty": 20,
@@ -42,6 +44,23 @@ _CHATTY_OPEN = re.compile(r"(up|to|my|me|your|our|it|that|this|these|those|about
 # "look up at the stars", "search me out": not a search query
 _CHATTY_SEARCH = re.compile(r"(up|at|to|me|my|it|that|this|out|over|down|on)\b")
 
+def _alt(words: list[str]) -> str:
+    return "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+
+
+_SITE = rf"(?:{_alt([*SITES, *(a for a in SITE_ALIASES if len(a) > 1)])})(?:\.com)?"
+_BROWSER = rf"(?:{_alt(list(BROWSERS))})"
+_OPEN_V = r"(?:open|launch|start|go to|pull up|bring up)(?: up)?"
+_AND = r"(?:\s*,\s*|\s+)(?:and\s+|then\s+)*"
+_FIND_V = r"(?:search(?: for| up)?|look up|look for|find|play|watch)"
+# Google/DuckDuckGo searches stay on web_search: the user wants the answer spoken, not a browser tab.
+_NOT_ANSWER_SITES = ("google", "duckduckgo")
+
+# "activate display mode" / "deactivate display mode": the on-screen text of the conversation
+_DISPLAY = r"(?:display|captions?|subtitles?|transcript|text|text display)"
+_ON_V = r"(?:activate|enable|turn on|switch on|start|show|enter)"
+_OFF_V = r"(?:deactivate|disable|turn off|switch off|stop|hide|exit|leave|end|close)"
+
 _PRE = r"^\s*(?:(?:hey |ok(?:ay)? )?ev[, ]+)?(?:please |can you |could you |would you )?"
 _POST = r"[\s.!?]*(?:please)?[\s.!?]*$"
 
@@ -58,9 +77,67 @@ def _dur(n: str, unit: str) -> dict[str, Any] | None:
     return {"seconds": int(v)}
 
 
+_THIS = r"(?:this|that|it|this window|that window|the window|current window|active window|this app|that app)"
+
+
+def _site_command(t: str) -> FastMatch | None:
+    """"open youtube", "open firefox and search youtube for X", "search for X on reddit", "go to example.com"."""
+    def args(site: str, q: str | None, b: str | None, url: str = "") -> dict[str, Any]:
+        a: dict[str, Any] = {"site": site} if site else {}
+        if url:
+            a["url"] = url
+        if q:
+            a["query"] = q.strip(" .,")
+        if b:
+            a["browser"] = b
+        return a
+
+    m = re.search(
+        _PRE + rf"(?:{_OPEN_V}\s+(?:the\s+)?(?P<b1>{_BROWSER})(?:{_AND}))?(?:{_OPEN_V}\s+(?:the\s+)?)?"
+        rf"(?P<site>{_SITE})(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b2>{_BROWSER}))?"
+        rf"(?:{_AND}{_FIND_V}\s+(?:for\s+)?(?P<q>.+?))?(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b3>{_BROWSER}))?" + _POST, t)
+    if m and re.search(rf"\b{_OPEN_V}\b", t):
+        return FastMatch("open_website", args(m["site"], m["q"], m["b1"] or m["b2"] or m["b3"]), "site")
+
+    m = re.search(
+        _PRE + rf"{_FIND_V}\s+(?:for\s+)?(?P<q>.+?)\s+(?:on|in|at)\s+(?:the\s+)?(?P<site>{_SITE})"
+        rf"(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b>{_BROWSER}))?" + _POST, t)
+    if m is None:
+        m = re.search(_PRE + rf"{_FIND_V}\s+(?:on\s+)?(?P<site>{_SITE})\s+for\s+(?P<q>.+?)"
+                      rf"(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b>{_BROWSER}))?" + _POST, t)
+    if m and m["site"].removesuffix(".com") not in _NOT_ANSWER_SITES:
+        return FastMatch("open_website", args(m["site"], m["q"], m["b"]), "site_search")
+
+    m = re.search(_PRE + rf"(?:{_OPEN_V}|visit)\s+(?:the\s+)?(?P<b>{_BROWSER})(?:{_AND})(?:search(?: for| up)?|look up|google)\s+(?P<q>.+?)" + _POST, t)
+    if m:
+        return FastMatch("open_website", args("google", m["q"], m["b"]), "browser_search")
+
+    m = re.search(_PRE + r"(?:open|go to|visit|launch)\s+(?P<d>[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|in|dev|ai|co|edu|gov))" + _POST, t)
+    if m:
+        return FastMatch("open_website", {"url": m["d"]}, "domain")
+    return None
+
+
+def _close_command(t: str) -> FastMatch | None:
+    m = re.search(_PRE + r"(?P<f>force[ -]?)?(?P<v>close|quit|kill|exit)(?: down)?\s+(?:the |my )?(?P<n>[a-z0-9 .+-]{1,40}?)"
+                  r"(?: app| application| window| program)?(?: for me)?(?: now| right now)?" + _POST, t)
+    if not m:
+        return None
+    name = m["n"].strip()
+    if re.fullmatch(_THIS, name):
+        name = "this"
+    elif re.match(r"(tabs?|this tab|that tab|the tab|browser|everything|all|up|out|down|in|off|on|a |an )\b|tabs?$", name):
+        return None                      # tabs and vague targets go to the model, which can pick the right tool
+    args: dict[str, Any] = {"name": name}
+    if m["f"] or m["v"] == "kill":
+        args["force"] = True
+    return FastMatch("close_app", args, "close")
+
+
 def match_fast(text: str) -> FastMatch | None:
     t = text.strip().lower()
     t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"[.?!]+\s+(?=[a-z])", ", ", t)       # Whisper punctuates "open firefox? open youtube and ..." as sentences
 
     if re.search(_PRE + r"(what(?:'s| is)? the time|what time is it|what(?:'s| is)? the date(?: today)?|what day is it(?: today)?|what(?:'s| is)? today'?s date|tell me the time|what(?:'s| is)? the (?:current )?time(?: right now| now)?)" + _POST, t):
         return FastMatch("get_time_date", {}, "time")
@@ -82,6 +159,24 @@ def match_fast(text: str) -> FastMatch | None:
             return FastMatch("set_reminder", {"text": m.group(3), "in_minutes": d["minutes"]}, "reminder_in")
         if d:
             return FastMatch("set_reminder", {"text": m.group(3), "in_minutes": d["seconds"] / 60}, "reminder_in")
+
+    m = re.search(_PRE + rf"(?:(?P<on>{_ON_V})|(?P<off>{_OFF_V}))\s+(?:the |my )?{_DISPLAY} mode" + _POST, t) or re.search(
+        _PRE + rf"(?:turn |switch )?{_DISPLAY} mode (?:(?P<on>on)|(?P<off>off))" + _POST, t)
+    if m:
+        return FastMatch("set_display_mode", {"enabled": bool(m["on"])}, "display_mode")
+
+    site_cmd = _site_command(t)
+    if site_cmd:
+        return site_cmd
+
+    m = re.search(_PRE + r"(?:take|grab|capture|snap)(?: me)?(?: a| the)?\s+(?:screenshot|screen ?shot|screen capture|picture of (?:my |the )?screen)"
+                  r"(?: of (?:my |the )?(?:screen|desktop|display))?(?: for me)?(?: now| right now)?" + _POST, t)
+    if m or re.search(_PRE + r"screenshot(?: this| my screen| the screen| it)?" + _POST, t):
+        return FastMatch("take_screenshot", {}, "screenshot")
+
+    cm = _close_command(t)
+    if cm:
+        return cm
 
     m = re.search(
         _PRE + r"(?:search(?: the (?:web|internet))?(?: online)?(?: for| up)?|google|look up|look online for|search up)\s+"

@@ -14,6 +14,7 @@ from typing import Any
 
 from ev.core.config import ROOT, load_toml
 from ev.core.log import get_logger
+from ev.tools import web
 
 log = get_logger("policy")
 
@@ -62,6 +63,10 @@ def normalize_combo(combo: str) -> str:
     return "+".join(mods + keys)
 
 
+def _compact(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
 class Policy:
     def __init__(self, data: dict[str, Any], root: Path = ROOT):
         self.d = data
@@ -84,6 +89,13 @@ class Policy:
         self.app_allow = {a.lower() for a in data.get("apps", {}).get("allowlist", [])}
         self.start_menu = bool(data.get("apps", {}).get("allow_start_menu_resolution", False))
         self.inj_res = [re.compile(p, re.I) for p in data.get("injection", {}).get("phrases", [])]
+        apps = data.get("apps", {})
+        self.protected_apps = {_compact(a) for a in apps.get("protected", [])}      # close_app never touches these
+        self.no_force_apps = {_compact(a) for a in apps.get("no_force", [])}        # may be closed politely, never killed
+        self.trusted_hosts = [h.lower().lstrip(".") for h in data.get("web", {}).get("trusted_hosts", [])]
+        cp = data.get("confirm_patterns", {})
+        self.confirm_res = [re.compile(p, re.I) for p in cp.get("args", [])]
+        self.confirm_pattern_tools = set(cp.get("tools", []))
 
     @classmethod
     def load(cls, path: Path) -> Policy:
@@ -141,6 +153,16 @@ class Policy:
             if name not in self.app_allow and not self.start_menu:
                 return Decision(Verdict.BLOCK, "app is not on the allowlist")
 
+        if tool == "open_website":
+            d = self._website(args)
+            if d is not None:
+                return d
+
+        if tool == "close_app":
+            d = self._close_app(args)
+            if d is not None:
+                return d
+
         if tool == "run_shell" and not self.shell_enabled:
             return Decision(Verdict.BLOCK, "shell is disabled")
 
@@ -168,9 +190,46 @@ class Policy:
             if combo in self.confirm_combos:
                 return Decision(Verdict.CONFIRM, f"press {combo}")
 
+        if tool == "open_app" and args.get("admin") is True:
+            return Decision(Verdict.CONFIRM, "open an app with administrator rights")
+        if tool in self.confirm_pattern_tools and any(rx.search(s) for s in strs for rx in self.confirm_res):
+            return Decision(Verdict.CONFIRM, "that involves administrator rights")
+
         if level == "confirm":
             return Decision(Verdict.CONFIRM, f"{tool} needs your approval")
         return Decision(Verdict.ALLOW)
+
+    def _website(self, args: dict[str, Any]) -> Decision | None:
+        browser = str(args.get("browser", "")).strip().lower()
+        if browser and browser not in web.BROWSERS:
+            return Decision(Verdict.BLOCK, "unknown browser")
+        target = web.build_url(str(args.get("site", "")), str(args.get("query", "")), str(args.get("url", "")))
+        if target is None:
+            return Decision(Verdict.BLOCK, "not a public website address")
+        # Data can leave in a hostname, path, query or fragment, and policy can't tell a link the user spoke from one a
+        # web page or screen suggested. So any address that isn't a known site or on the trusted list asks first.
+        named_site = web.canonical_site(str(args.get("site", ""))) in web.SITES
+        if (args.get("url") or not named_site) and not self._trusted_host(web.host_of(target)):
+            if args.get("url") or args.get("site"):
+                return Decision(Verdict.CONFIRM, f"open {web.host_of(target)}, which isn't a site I know")
+        return None
+
+    def _trusted_host(self, host: str) -> bool:
+        host = host.lower()
+        return host in web.KNOWN_HOSTS or any(host == t or host.endswith("." + t) for t in self.trusted_hosts)
+
+    def _close_app(self, args: dict[str, Any]) -> Decision | None:
+        name = str(args.get("name", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .+_-]{0,59}", name) or re.search(r"(^|\s)[-/]", name):
+            return Decision(Verdict.BLOCK, "invalid app name")
+        key = _compact(name)
+        if key in self.protected_apps:
+            return Decision(Verdict.BLOCK, f"{name} is protected")
+        if args.get("force") is True:
+            if key in self.no_force_apps:
+                return Decision(Verdict.BLOCK, f"{name} can't be force closed")
+            return Decision(Verdict.CONFIRM, f"force close {name}; unsaved work would be lost")
+        return None
 
     def check_sensitive_target(self, window_title: str, control_name: str = "",
                                is_password: bool = False) -> Decision:

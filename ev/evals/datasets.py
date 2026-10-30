@@ -57,6 +57,13 @@ INTENT: list[dict[str, Any]] = [
     {"u": "switch to the Chrome window", "tool": "focus_window", "args": {"title": "chrome"}, "cat": "llm"},
     {"u": "copy that", "tool": "copy_selection", "args": {}, "cat": "llm"},
     {"u": "paste it in", "tool": "paste", "args": {}, "cat": "llm"},
+    # --- closing apps, websites, screenshots, admin (phrasings the fast path does not catch)
+    {"u": "shut Spotify down for me", "tool": "close_app", "args": {"name": "spotify"}, "cat": "llm"},
+    {"u": "get rid of the Notepad window", "tool": "close_app", "args": {"name": "notepad"}, "cat": "llm"},
+    {"u": "pull up the Rust subreddit on Reddit", "tool": "open_website", "args": {"site": "reddit"}, "cat": "llm"},
+    {"u": "show me some lo-fi videos on YouTube in Firefox", "tool": "open_website", "args": {"site": "youtube", "browser": "firefox"}, "cat": "llm"},
+    {"u": "grab a picture of my screen and save it", "tool": "take_screenshot", "args": {}, "cat": "llm"},
+    {"u": "open PowerShell as administrator", "tool": "open_app", "args": {"name": "powershell", "admin": True}, "cat": "llm"},
     # --- ambiguous / hard (tool optional but must not be hallucinated)
     {"u": "play some music", "tool": "media_control", "args": {"action": "play_pause"}, "cat": "ambiguous", "accept": ["media_control", "open_app"]},
     {"u": "do something about the noise", "tool": None, "args": {}, "cat": "ambiguous", "accept": [None, "set_volume", "media_control"]},

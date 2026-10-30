@@ -16,7 +16,7 @@ confirm_no = "ctrl+alt+n"
 
 [trigger]
 mode = "wakeword"              # "hotkey" | "wakeword" (the push-to-talk hotkey always works too)
-wakeword_model = "hey_jarvis"  # placeholder pretrained model, or a path to a custom .onnx; see docs for "Hey EV"
+wakeword_model = "hey_evie"  # placeholder pretrained model, or a path to a custom .onnx; see docs for "Hey EV"
 wakeword_dir = "models/openwakeword"   # fetch once: python scripts/download_models.py --wakeword hey_jarvis
 wakeword_threshold = 0.5
 
@@ -27,7 +27,7 @@ followup_question_window_s = 12   # longer window when EV's reply ended with a q
 followup_max_turns = 8         # safety cap on back-to-back turns per activation
 voice_interrupt = true         # talk over EV while it speaks and it stops and listens
 interrupt_min_ms = 300         # how long you must keep talking before EV stops (higher = fewer false stops)
-interrupt_margin = 2.0         # how much louder than EV's own echo you must be; raise on loud speakers
+interrupt_margin = 1.5         # how much louder than EV's own echo (predicted from what was playing ~0.5 s ago) you must be; raise if EV still cuts itself off, e.g. on loud speakers
 interrupt_floor = 0.015        # absolute minimum mic level (0..1) that can count as you talking
 
 [audio]
@@ -48,10 +48,10 @@ device = "cpu"
 cpu_threads = 6
 language = "en"
 beam_size = 3
-hotwords = ["Evie", "EV", "Sam", "Spotify", "Firefox", "Chrome", "Discord", "Notepad", "Ollama", "VS Code"]   # biases decoding toward words EV hears often
+hotwords = ["Evie", "EV", "Sam", "Spotify", "Firefox", "Chrome", "Discord", "Notepad", "Ollama", "VS Code", "YouTube", "display mode"]   # biases decoding toward words EV hears often
 
 [tts]
-engine = "kokoro"              # "piper" | "kokoro"; kokoro is far more natural, and EV falls back to piper if it can't load
+engine = "piper"               # "piper" | "kokoro"; piper (hfc_female) is the main voice, kokoro is the optional more natural one
 piper_voice = "en_US-hfc_female-medium"
 piper_voice_dir = "models/piper"
 length_scale = 1.0
@@ -85,6 +85,7 @@ max_image_px = 768
 max_capture_px = 1280
 ocr_min_confidence = 0.5
 agent_max_steps = 8
+screenshot_dir = ""             # where "take a screenshot" saves PNGs; "" = Pictures\EV Screenshots
 
 [overlay]
 enabled = true
@@ -98,6 +99,11 @@ height = 32
 bar_count = 11
 fps = 30
 fade_ms = 180
+display_mode = false           # start with the text card on; "EV, activate display mode" / "deactivate display mode" toggles it
+display_width = 460            # card width in px (the pill stays put)
+display_max_height = 300       # pill + card never grow taller than this; long replies scroll so the newest words show
+display_font_pt = 12
+display_linger_s = 8           # how long the card stays after EV finishes talking
 hide_delay_ms = 600
 fill = "#111111"
 fill_alpha = 235

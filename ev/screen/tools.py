@@ -1,6 +1,9 @@
 """Screen-awareness tools: read_screen (UIA -> OCR) and screenshot_describe (VLM)."""
 from __future__ import annotations
 
+import datetime as dt
+from pathlib import Path
+
 from ev.core.config import Config
 from ev.llm.client import OllamaClient
 from ev.safety.policy import Policy
@@ -40,6 +43,19 @@ def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client
         r = VLM(cfg, client).describe(img, question or "Describe what is on this screen briefly.")
         return ToolResult(True, r.text, {"load_s": r.load_s}, untrusted=True, source="screen_vlm")
 
+    def take_screenshot() -> ToolResult:
+        """Save the whole screen as a PNG the user can find. Only on request; nothing else here writes screenshots."""
+        win = uia.foreground_window()
+        if win is not None and policy.check_sensitive_target(uia.window_title(win)).verdict.value == "block":
+            return ToolResult(False, "That window looks sensitive, so I won't screenshot it.")
+        folder = Path(cfg["screen"].get("screenshot_dir") or Path.home() / "Pictures" / "EV Screenshots")
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"EV {dt.datetime.now():%Y-%m-%d %H-%M-%S}.png"
+        capture.grab(cfg, full=True).save(path)
+        return ToolResult(True, "Took a screenshot and saved it.", {"path": str(path)})
+
+    reg.register(Tool("take_screenshot", "Take a screenshot of the screen and save it as an image file for the user.",
+                      {}, take_screenshot, timeout_s=15))
     reg.register(Tool("read_screen", "Read the text currently visible on the user's screen.", {
         "method": {"type": "string", "enum": ["auto", "uia", "ocr"]}}, read_screen, timeout_s=20))
     reg.register(Tool("screenshot_describe", "Describe the screen visually (slow; use only if read_screen is not enough).", {

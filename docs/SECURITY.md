@@ -13,10 +13,14 @@ talked into bad ideas and defends *outside* the model.
 7. **Kill switch.** `Ctrl+Alt+Shift+K` sets a gate-wide kill event (every tool call denied), stops TTS and recording, aborts the agent loop. Re-arms after 1 s. pyautogui's corner failsafe is also on.
 
 ## Blocked outright
-Typing into password fields (UIA `IsPassword` and name patterns), credential-store access, registry edits, disabling security software, `format`/`diskpart`, arbitrary shell, downloaded-code execution, `Win+R`, `Alt+F4`, `Ctrl+Alt+Del`, anything outside the safe folders, any argument containing `..\`, env-var or `~` expansion, or a null byte. Strings are NFKC-normalised and stripped of invisible/format characters before matching (so `S<ZWSP>end` is still "Send").
+Typing into password fields (UIA `IsPassword` and name patterns), credential-store access, registry edits, disabling security software, `format`/`diskpart`, arbitrary shell, downloaded-code execution, `Win+R`, `Alt+F4`, `Ctrl+Alt+Del`, closing protected processes (Windows services, Defender, Ollama; EV's own process and the terminal it runs in are skipped at run time), opening non-public or non-web addresses (`localhost`, IPs, `file:`, `javascript:`, `user@host`, ports), anything outside the safe folders, any argument containing `..\`, env-var or `~` expansion, or a null byte. Strings are NFKC-normalised and stripped of invisible/format characters before matching (so `S<ZWSP>end` is still "Send").
 
 ## Needs spoken confirmation
 Deleting/moving files, sending messages, clicking controls named like send / submit / delete / buy / pay / install / sign out / discard / post, pressing Enter / Delete / Ctrl+W. Readback example: "click Send".
+
+**Administrator rights:** any `open_app admin=true`, and any `open_app` / `open_website` / `close_app` / `click_element` / `focus_window` / `do_on_screen` argument mentioning admin, administrator, run as, elevate, sudo or superuser (`[confirm_patterns]` in `policy.toml`). EV never elevates by itself: an approved launch goes through Windows' own UAC prompt, which EV cannot answer. **Force-closing** an app (`close_app force=true`; unsaved work is lost). **Unfamiliar sites:** `open_website` with an address that isn't a built-in site or in `[web] trusted_hosts` (data can leave in a hostname, path or query, and policy can't tell a spoken link from one a page suggested).
+
+Everything else the user asks for (open or close apps politely, open sites, search a site, read the screen, take screenshots) runs without asking. A normal `close_app` sends the same close request as the X button, so apps still offer to save.
 
 ## Threat model
 

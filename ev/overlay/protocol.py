@@ -13,6 +13,7 @@ import socket
 from typing import Any
 
 MAX_LINE = 4096
+MAX_TEXT = 600            # characters per text message; the client trims longer sentences
 AUTH_TIMEOUT_S = 2.0
 LOOPBACK = "127.0.0.1"
 
@@ -22,7 +23,8 @@ def new_token() -> str:
 
 
 def encode(msg: dict[str, Any]) -> bytes:
-    return (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+    # ensure_ascii=False: escaping curly quotes or non-English text as \uXXXX would blow past MAX_LINE
+    return (json.dumps(msg, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
 def decode(line: bytes) -> dict[str, Any] | None:
@@ -56,6 +58,12 @@ def valid_message(m: dict[str, Any]) -> bool:
         return isinstance(m.get("v"), str) and len(m["v"]) < 24
     if t == "level":
         return isinstance(m.get("v"), int | float) and not isinstance(m.get("v"), bool)
+    if t == "text":
+        v = m.get("v")
+        return (m.get("who") in ("user", "ev") and isinstance(v, str) and 0 < len(v) <= MAX_TEXT
+                and isinstance(m.get("append", False), bool))
+    if t == "display":
+        return isinstance(m.get("v"), bool)
     if t == "quit":
         return True
     return False

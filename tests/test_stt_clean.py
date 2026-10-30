@@ -14,3 +14,12 @@ def test_quiet_speech_is_brought_up_and_dc_removed():
 def test_silence_is_not_amplified_into_noise():
     y = clean_audio(np.zeros(1600, np.float32), 16000)
     assert float(np.max(np.abs(y))) == 0.0
+
+
+def test_common_misheard_names_are_fixed():
+    from ev.stt.whisper import fix_names
+
+    assert fix_names("Can You Open Fire Fox? Open You Due and Search for Mr. Who's the Boss?") == \
+        "Can You Open Firefox? Open YouTube and Search for Mr. Who's the Boss?"
+    assert fix_names("go to you tube and open git hub") == "go to YouTube and open GitHub"
+    assert fix_names("what is due on Friday") == "what is due on Friday"          # ordinary words are untouched

@@ -19,7 +19,7 @@ _DEFAULT_PHRASES = [
     r"pre-?approved",
     r"note to (the )?(ai|assistant|model)",
     r"always trust",
-    r"\b(remember_fact|forget_fact|delete_file|run_shell|send_message|type_text|press_keys)\b",
+    r"\b(remember_fact|forget_fact|delete_file|run_shell|send_message|type_text|press_keys|close_app|open_website)\b",
     r"the user has (already )?(confirmed|approved|authorized)",
 ]
 

@@ -8,7 +8,7 @@
         |                                                  |
         | level                                            v text
         v                                            [llm.brain]
-  [overlay.client] <--state/level--  core  --------> fast path (regex) or Ollama (GPU)
+  [overlay.client] <--state/level/text--  core  --------> fast path (regex) or Ollama (GPU)
    (separate process,                 ^                     |
     token-auth loopback)              |             tool calls (validated)
                                       |                     v

@@ -6,16 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `docs/PROJECT_DOCUMENTATION.md`: full project documentation (architecture, modules, tools, safety model, setup for the conda env, limitations) including the trained "Hey Evie" wake-word results from `scripts/wakeword/trained_output/`.
+- **Wake-word training kit** (`scripts/wakeword/`) for a custom openWakeWord model, `hey_evie`, that answers to "hey evie", "hey EV", "evie" and "EV". Piper speech (EV's `hfc_female` voice is the largest share, plus five other voices) with noise/reverb/EQ augmentation, near-miss and real-speech negatives (LibriSpeech, ESC-50), a small FCN head trained with torch and exported to ONNX, and a streaming evaluator (recall on unseen voices, false triggers/hour). `train_cloud.ipynb` runs it all on Colab/Kaggle; `record.py` records your own voice. See `scripts/wakeword/README.md`. The model itself is not trained yet.
+- `scripts/download_models.py` can fetch three more Piper voices (`ryan`, `libritts_r`, `alan`), used only for wake-word training data.
+
+### Fixed
+- Wake-word training: the near-miss list no longer contains spellings of the wake word itself ("eevee", "Eevie", "eevee evolution", "hi Evie's friend"), which labelled the same sound both positive and negative.
+
+### Removed
+- Project cleanup: one-off install/pull logs and leftovers in `scripts/`, `docs/PROGRESS.md` (stale Phase 0 notes) and the generated `PROJECT_DOCUMENTATION.md`. Dangling doc references were fixed.
+
+### Changed
+- `config/ev.toml`: `tts.engine` is now `"piper"` (`en_US-hfc_female-medium`) instead of `"kokoro"`; Kokoro stays available as an option.
+
+### Added
+- **Display mode**: say "activate display mode" (also "enable/turn on ... display/caption/subtitle mode") and the pill grows a text card showing what you said and EV's reply as it is spoken, sentence by sentence; "deactivate display mode" puts it away. The mode is remembered across restarts (`overlay.display_mode` sets the default), the card stays `overlay.display_linger_s` after EV finishes, and long replies scroll so the newest words stay visible. Voice command is a fast-path match to the new `set_display_mode` tool. Overlay protocol gained `display` and `text` messages; the wire format is now UTF-8 instead of `\uXXXX` escapes so curly quotes and non-English text fit the line limit. `python -m ev.overlay --demo --display` previews it.
 - `ev.stt.whisper.clean_audio`, `Speaker(pause_ms=...)`, `make_engine(cfg, kind)` and tests for the reply cap and audio cleanup (`tests/test_stt_clean.py`, `tests/test_brain.py`).
 - Decision D17 in `docs/DECISIONS.md` recording the STT/TTS/reply-length changes and what was and wasn't measured.
 
+### Added
+- **Close apps by voice**: `close_app` ("close Notepad", "close this window") asks the app's windows to close like the X button, so unsaved work still gets a save prompt. "Force quit" / "kill" needs a spoken yes. Windows services, Defender, Ollama, EV itself and the terminal it runs in are never touched.
+- **Websites**: `open_website` opens a site or searches it in the default browser or a named one ("open Firefox, open YouTube and search for the latest tech video" is one fast-path call; "latest" sorts YouTube by upload date). Only public https sites; any address that isn't a built-in site or in `[web] trusted_hosts` (policy.toml) asks first, since data can leave in a hostname or path.
+- **Screenshots**: `take_screenshot` saves a full-resolution PNG to `Pictures\EV Screenshots` (`screen.screenshot_dir`), refusing if the active window looks sensitive.
+- **Administrator rights always ask**: `open_app admin=true` and any admin/elevate/run-as wording in app, website, window or screen-agent requests need a spoken yes (`[confirm_patterns]`); EV never elevates itself, Windows' UAC prompt still appears.
+- The screen agent can use `open_website` and `close_app`; confirmations read back what will happen ("force close chrome. Anything unsaved in it will be lost").
+
 ### Changed
+- Config: `hotwords` gain "YouTube" and "display mode"; `interrupt_margin` 2.0 -> 1.5. Added `tests/test_interrupt.py` and the recorded-levels fixture `tests/data/echo_laptop_speakers.json` (levels only, no audio).
+- Overlay wire format is UTF-8 (`ensure_ascii=False`); `Pill` now sizes itself from its content and positions the pill by anchor inside a wider window. Tests added for display mode (`tests/test_display_mode.py`, plus integration turns in `tests/test_integration.py`).
 - `read_screen` hint now asks for one short casual sentence instead of one or two.
 - Speech recognition: default model is now `distil-small.en` (beam 3, 6 threads) instead of `base`; input audio is DC/rumble filtered and level-normalised before decoding, Whisper gets `hotwords` for EV's common vocabulary and a temperature fallback, and the pre-speech buffer grew from 300 to 480 ms (`audio.pre_roll_ms`). Costs about 1.3 s more per turn than `base`; set `stt.model = "base"` to trade back.
 - Voice: default TTS engine is Kokoro (`af_heart`, speed 1.05) with a 90 ms pause between sentences (`tts.sentence_pause_ms`); EV falls back to Piper if Kokoro can't load.
 - Replies: `llm.reply_max_sentences = 2` is now enforced in `Brain` (generation stops once reached; 6 when the user asks for detail), `num_predict` dropped from 220 to 110, and the persona's speaking rules were rewritten for a casual, answer-first voice.
 
 ### Fixed
+- EV interrupting itself, again (`user talked over EV (echo ratio 0.01)`). Measured on a laptop: EV's voice reaches its own mic about 0.5 s after the playback meter shows it, and its echo is as loud as normal speech, so the detector's "mic vs playback right now" comparison took EV's own voice for the user (2 of 3 recordings fired with nobody talking). The detector now learns the speaker-to-mic delay itself, predicts echo from what was playing that long ago, stays disarmed for the first 1.2 s of a reply and never learns the user's voice as echo. 0 false interrupts on four real recordings; `conversation.interrupt_margin` is now 1.5. Tests use the recorded levels (`tests/data/echo_laptop_speakers.json`).
+- Whisper mishearings of names EV hears often ("Open Fire Fox", "open you due" for YouTube) are corrected after transcription, and sentence breaks in a multi-command utterance ("Open Firefox? Open YouTube and search...") no longer stop the fast path from matching.
 - EV heard its own voice and answered it: the voice-interrupt detector calibrated the speaker echo before the echo reached the mic (ratio ~0), so EV's own speech counted as the user talking over it and was transcribed as the next question. Calibration now spans ~600 ms (75th percentile) and the expected echo uses the loudest playback of the last ~360 ms, which also covers the gaps between sentences.
 - Tool calling for app launches: "open **up** Claude Desktop", "... in my PC" and "... for me" now reach `open_app`; Store apps (Claude, etc.) resolve, Whisper mishearings like "Cloud" -> "Claude" are corrected as a second guess, an exact name always beats a loose match (no more "cloud" -> Genshin Impact Cloud), and fuzzy matching no longer turns "photoshop" into Photos.
 - EV no longer speaks sentences that name internal tools ("I can use the web_search tool..."), and the persona stops it claiming it can't open apps or see the screen.

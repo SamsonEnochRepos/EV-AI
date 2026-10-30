@@ -49,6 +49,7 @@ class OverlayClient:
         self._last_start = 0.0
         self._last_level_sent = 0.0
         self._last_state = "idle"
+        self._display = False
 
     # ---- lifecycle
     def start(self) -> bool:
@@ -78,6 +79,8 @@ class OverlayClient:
             s.sendall(protocol.encode({"token": self.token}))
             self.sock = s
             s.sendall(protocol.encode({"t": "state", "v": self._last_state}))   # lock already held
+            if self._display:                                                   # a restarted overlay keeps display mode
+                s.sendall(protocol.encode({"t": "display", "v": True}))
             return True
         except Exception as e:
             log.warning("overlay failed to start: %s", e)
@@ -121,6 +124,21 @@ class OverlayClient:
     def send_state(self, state: str) -> None:
         self._last_state = state
         self._send({"t": "state", "v": state})
+
+    def send_display(self, on: bool) -> None:
+        """Turn the text card on or off. Remembered, so an overlay that restarts comes back in the same mode."""
+        self._display = on
+        if self.sock is not None:
+            self._send({"t": "display", "v": on})
+
+    def send_text(self, who: str, text: str, append: bool = False) -> None:
+        """Show a line of conversation on the card. Does nothing unless display mode is on."""
+        text = " ".join(text.split())
+        if not self._display or not text:
+            return
+        if len(text) > protocol.MAX_TEXT:
+            text = text[: protocol.MAX_TEXT - 1].rstrip() + "…"
+        self._send({"t": "text", "who": who, "v": text, "append": append})
 
     def send_level(self, level: float) -> None:
         now = time.monotonic()

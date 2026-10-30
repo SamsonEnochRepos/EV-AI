@@ -1,6 +1,7 @@
 """faster-whisper wrapper (CPU, int8). Lazily loaded."""
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -25,6 +26,23 @@ class Transcript:
     @property
     def rtf(self) -> float:
         return self.seconds / self.audio_seconds if self.audio_seconds else 0.0
+
+
+# Names Whisper splits or mishears in real use ("Open Fire Fox", "open you due"). Kept deliberately small and literal.
+_NAME_FIXES = [
+    (re.compile(r"\bfire[ -]?fox\b", re.I), "Firefox"),
+    (re.compile(r"\b(?:you|u)[ -]?tube\b", re.I), "YouTube"),
+    (re.compile(r"\b(open|launch|go to|on|and|to) (?:you due|you dude|u tube)\b", re.I), r"\1 YouTube"),
+    (re.compile(r"\bg[ -]?mail\b", re.I), "Gmail"),
+    (re.compile(r"\bgit[ -]hub\b", re.I), "GitHub"),
+    (re.compile(r"\bdis?play mode\b", re.I), "display mode"),
+]
+
+
+def fix_names(text: str) -> str:
+    for rx, rep in _NAME_FIXES:
+        text = rx.sub(rep, text)
+    return text
 
 
 def clean_audio(x: np.ndarray, sr: int) -> np.ndarray:
@@ -89,7 +107,7 @@ class STT:
             no_speech_threshold=0.6, log_prob_threshold=-1.0, compression_ratio_threshold=2.4,
             hotwords=self.hotwords,
         )
-        text = " ".join(s.text.strip() for s in segs).strip()
+        text = fix_names(" ".join(s.text.strip() for s in segs).strip())
         return Transcript(text, time.perf_counter() - t0, audio_s)
 
     def unload(self) -> None:

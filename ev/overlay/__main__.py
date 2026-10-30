@@ -12,6 +12,7 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--demo", action="store_true", help="cycle through every state with synthetic audio")
     g.add_argument("--serve", action="store_true", help="internal: run as EV's overlay process")
+    ap.add_argument("--display", action="store_true", help="with --demo: show display mode (the text card)")
     a = ap.parse_args()
     cfg = load_config()
     toolkit = cfg["overlay"].get("toolkit", "qt")
@@ -21,7 +22,7 @@ def main() -> int:
         return tk_app.run_demo(cfg)
     from . import qt_app
 
-    return qt_app.run_demo(cfg) if a.demo else qt_app.run_server(cfg)
+    return qt_app.run_demo(cfg, a.display) if a.demo else qt_app.run_server(cfg)
 
 
 if __name__ == "__main__":

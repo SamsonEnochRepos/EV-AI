@@ -8,7 +8,7 @@ EV: a fully local, voice-first desktop assistant for Windows (Python 3.11/3.12).
 
 ## Commands
 
-The environment is a `.venv` (uv) or a conda env named `ev`. The Makefile assumes `.venv/Scripts/python.exe`.
+The environment is a conda env named `ev` (the owner uses conda only; `.venv` is an unused alternative). The Makefile assumes `.venv/Scripts/python.exe`.
 
 ```powershell
 make check                                      # ruff + mypy + pytest

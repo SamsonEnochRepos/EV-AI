@@ -171,8 +171,17 @@ def find_store_app(name: str, loose: bool = True) -> tuple[str, str] | None:
     return None
 
 
-def launch_app(name: str, allow_start_menu: bool = True) -> str:
-    """Launch an app by friendly name. Returns a short description of what was launched."""
+def _run_elevated(path: str, args: str | None = None) -> None:
+    """Ask Windows to start `path` as administrator. Windows shows its own UAC prompt; EV can't answer it."""
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, args, None, 1)
+    if rc <= 32:
+        raise PermissionError("Windows didn't allow that, or the administrator prompt was declined")
+
+
+def launch_app(name: str, allow_start_menu: bool = True, elevate: bool = False) -> str:
+    """Launch an app by friendly name. Returns a short description of what was launched.
+
+    elevate=True starts it as administrator; callers only pass it after the user has confirmed out loud."""
     key = name.strip().lower()
     if key in KNOWN_APPS:
         argv = KNOWN_APPS[key]
@@ -181,7 +190,10 @@ def launch_app(name: str, allow_start_menu: bool = True) -> str:
             return key
         exe = resolve_exe(argv[0])
         if exe:
-            subprocess.Popen([exe, *argv[1:]], close_fds=True)  # noqa: S603
+            if elevate:
+                _run_elevated(exe, " ".join(argv[1:]) or None)
+            else:
+                subprocess.Popen([exe, *argv[1:]], close_fds=True)  # noqa: S603
             return key
         # not installed under that exe name: fall through to Start-menu resolution
     if allow_start_menu:
@@ -189,7 +201,10 @@ def launch_app(name: str, allow_start_menu: bool = True) -> str:
         for loose in (False, True):
             lnk = find_start_menu_entry(key, loose)
             if lnk:
-                os.startfile(str(lnk))  # type: ignore[attr-defined]  # noqa: S606
+                if elevate:
+                    _run_elevated(str(lnk))
+                else:
+                    os.startfile(str(lnk))  # type: ignore[attr-defined]  # noqa: S606
                 return lnk.stem
             store = find_store_app(key, loose)
             if store:
