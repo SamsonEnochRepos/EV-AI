@@ -14,7 +14,7 @@ interface is a small overlay "pill" and a tray icon (`README.md`, `ev/app.py`).
 |---|---|
 | **Type** | Desktop voice assistant (Python application, Windows only) |
 | **Language / runtime** | Python 3.11 or 3.12 (`requires-python = ">=3.11,<3.13"` in `pyproject.toml`; the conda env pins 3.12 in `environment.yml`) |
-| **Size** | About 8,000 lines in `ev/` (counted with `wc -l` over `ev/*.py` and `ev/*/*.py`), 177 test functions in 12 test files |
+| **Size** | About 8,000 lines in `ev/` (counted with `wc -l` over `ev/*.py` and `ev/*/*.py`), 373 tests in 13 test files |
 | **Maturity** | Early and actively changing. Version `0.1.0`; 3 commits in git history; `CHANGELOG.md` has everything under `[Unreleased]`; a large part of the work (display mode, web/close-app tools, wake-word training kit, barge-in rewrite) is still uncommitted (`git status`). |
 | **Privacy stance** | No cloud, no telemetry. Egress is limited to optional DuckDuckGo search and Open-Meteo weather (`docs/SECURITY.md`, `config/ev.toml [web]`). |
 
@@ -80,16 +80,18 @@ One interaction, as implemented in `ev/app.py` (`on_trigger` → `_conversation`
    is open only while recording.
 3. **Transcribe.** `ev/stt/whisper.py::STT` runs faster-whisper (`distil-small.en`, int8, CPU) after cleaning the audio
    (`clean_audio`: rumble filter and level normalisation) with hotwords biasing common vocabulary.
-4. **Fast path or LLM.** `Brain.respond` first tries `llm/fastpath.py::match_fast`. A match runs the tool directly. If
-   not, it builds a prompt (persona + remembered facts + rolling summary + time + trimmed history) and streams
-   `/api/chat` from Ollama with the tool schemas.
+4. **Fast path or LLM.** `Brain.respond` first tries `llm/fastpath.py::match_fast`. A match runs the tool directly; a
+   bare "thanks"/greeting/goodbye gets a canned reply (`match_smalltalk`). If neither applies, it builds a prompt (persona +
+   remembered facts + rolling summary + today's date and part of the day + trimmed history; the prompt is kept stable so
+   Ollama's prompt cache stays valid) and streams `/api/chat` from Ollama with the tool schemas.
 5. **Tool calls.** Each call is schema-validated (`tools/base.py::validate_args`), checked by `SafetyGate`, then run in
-   a thread pool with a per-tool timeout. Results from web/screen/file sources are wrapped as untrusted data
+   a thread pool with a per-tool timeout (a batch of side-effect-free tools runs concurrently; a slow tool gets a spoken
+   "one sec" after `llm.filler_after_s`). Results from web/screen/file sources are wrapped as untrusted data
    (`safety/untrusted.py`) before the model sees them. The loop is capped at `max_tool_steps = 5`.
 6. **Speak.** `SentenceSplitter` hands sentences to `tts/speaker.py::Speaker` as they complete; the reply is capped at 2
    sentences (6 when the user asks for detail). While EV speaks, `InterruptMonitor` listens for the user talking over it.
-7. **Follow up.** After a reply EV keeps listening for 7 s (12 s if the reply was a question) without a wake word, up to
-   8 turns, unless the user wraps up ("thanks", "that's all"...).
+7. **Follow up.** After a reply EV keeps listening for 7 s (12 s if the reply was a question) without a wake word, plus
+   2 s per back-to-back turn up to 15 s, up to 8 turns, unless the user wraps up ("thanks", "that's all"...).
 8. **Display mode (optional).** If on, the overlay shows the user's text and EV's reply as a text card under the pill.
 
 ```mermaid
@@ -218,7 +220,7 @@ EV_AI/
 │   ├── overlay/                # client.py, protocol.py, display.py, anim.py, qt_app.py, tk_app.py, __main__.py
 │   └── evals/                  # eval and benchmark suites, run via python -m ev.evals.run
 ├── config/                     # ev.toml, policy.toml, persona.md (+ git-ignored ev.local.toml)
-├── docs/                       # ARCHITECTURE.md, DECISIONS.md (D1-D20), SECURITY.md, this file
+├── docs/                       # ARCHITECTURE.md, DECISIONS.md (D1-D21), SECURITY.md, this file
 ├── scripts/
 │   ├── download_models.py      # Piper voices, Whisper, openWakeWord base models (with SHA-256 records)
 │   └── wakeword/               # wake-word training kit
@@ -239,7 +241,7 @@ EV_AI/
 | Module | Purpose | Notes |
 |---|---|---|
 | `ev/app.py` | `EVApp` composes everything and runs the turn loop. Owns confirmation (`confirm`), kill switch (`kill`, re-arms after 1 s), tray, display-mode tool and the `do_on_screen` tool. | Screen/control tools are registered lazily so a lightweight setup still starts. |
-| `ev/llm/brain.py` | Prompt building, history trimming to the context budget, streaming tool loop, sentence cap, tool execution through the gate, rolling summary every 8 turns. | Drops sentences that name internal tools (e.g. "web_search"). Parses tool calls that a small model emits as JSON text. |
+| `ev/llm/brain.py` | Prompt building, history trimming to the context budget, streaming tool loop, sentence cap, tool execution through the gate, rolling summary every 8 turns. | Primes Ollama's prompt cache (`warm`, `rewarm_if_cold`), runs the summary in the background and speaks a filler for slow tools. Drops sentences that name internal tools (e.g. "web_search"). Parses tool calls that a small model emits as JSON text. |
 | `ev/llm/fastpath.py` | Regex intents: time, timers, reminders, display mode, screenshot, web search and weather (these two go back to the LLM to phrase), read screen, open app, site/search/open website, close app, volume, media, notes, forget, copy, paste. | Skips the LLM but still goes through the gate. See Limitations: the open-app pattern is greedy. |
 | `ev/safety/policy.py` | Pure decision function: tool level, blocked patterns, app allowlist and name validation, website checks, close-app protection, key-combo and control rules, administrator wording. | Text is NFKC-normalised and invisible characters are stripped before matching. |
 | `ev/safety/gate.py` | The only path to execution. BLOCK → deny; ALLOW → go; CONFIRM → system readback via `ask`, fails closed with no asker. Keeps a 200-entry audit list. | `YES`/`NO` regexes are strict ("yes but also…" is rejected). |
@@ -514,7 +516,8 @@ the `ev` environment's Python.
 
 Notable current values (`config/ev.toml`): `trigger.mode = "wakeword"`, `stt.model = "distil-small.en"`,
 `tts.engine = "piper"` (`en_US-hfc_female-medium`), `llm.model = "qwen2.5:3b"`, `llm.num_ctx = 4096`,
-`llm.reply_max_sentences = 2`, `conversation.interrupt_margin = 1.5`, `overlay.display_mode = false`.
+`llm.reply_max_sentences = 2`, `conversation.interrupt_margin = 1.5`, `overlay.display_mode = false`,
+`llm.direct_tool_replies = false`, `llm.filler_after_s = 1.3`, `conversation.followup_patience_s = 2`, `conversation.continuous_mic = false`.
 
 **Environment variables.** The code reads none for configuration. `ev/__main__.py` *sets* `HF_HUB_OFFLINE`,
 `HF_HUB_DISABLE_TELEMETRY`, `DO_NOT_TRACK`, `ANONYMIZED_TELEMETRY` and `TRANSFORMERS_OFFLINE` at startup. No secrets or
@@ -522,7 +525,7 @@ API keys are used anywhere in the project.
 
 ## Testing and Quality
 
-* **Framework:** pytest (`tests/`, 177 test functions across 12 files, counted not executed). Markers: `integration`
+* **Framework:** pytest (`tests/`, 373 tests across 13 files). Markers: `integration`
   (pipeline with mocked hardware), `eval`, `hardware`; by default `eval` and `hardware` are excluded (`pyproject.toml`).
 * **Fixtures:** `tests/conftest.py` (`cfg`, `policy`, `memory`, `scheduler`, `gate`, `registry` with a fixed clock) and
   `tests/fakes.py::FakeOllama`, an httpx transport replaying scripted replies.
@@ -533,7 +536,7 @@ API keys are used anywhere in the project.
 * **Lint / types:** ruff (line length 120, rules `E,F,I,B,S,UP`), mypy (`check_untyped_defs`), bandit and pip-audit in
   the `dev` extra.
 * **CI:** none found (no `.github/workflows` or other CI config).
-* **Test run status:** the suite was **not run** while writing this document.
+* **Test run status:** 373 passed (unit + integration), ruff and mypy clean, security suite 88/88 with 0 bypasses (run on 2026-10-30, after the D21 latency changes).
 
 ## Limitations and Known Issues
 
@@ -549,13 +552,10 @@ Observed in the code, docs and the user's console log:
    `do_on_screen` runs a multi-step loop (8 steps). No background goals, no planning loop.
 4. **Small-model weaknesses.** A 3B model can invent answers (for example it explained its "context window" incorrectly in
    the shared log). Mitigations in code: reply caps, tool-name filtering, persona rules, hints on tool results.
-5. **Documentation drift** (inferred from reading both code and docs):
-   * `README.md` still describes a `.venv`/uv setup, `en_US-amy-medium` as the default voice, `whisper base`, and says
-     there is no custom "Hey EV" model with `hey_jarvis` as the default.
-   * `config/ev.toml` line 19 comment still calls `hey_evie` a "placeholder pretrained model".
-   * `docs/DECISIONS.md` D8 describes `hey_jarvis` as the default and has no entry for the trained model.
-   * `docs/ARCHITECTURE.md` still names Moondream as the VLM (the configured model is `qwen2.5vl:3b`).
-   * `docs/SECURITY.md` mentions a lockfile and `models/checksums.json`; no lockfile was found in the repository.
+5. **Documentation drift** (checked 2026-10-31): README, the `config/ev.toml` wake-word comment, DECISIONS D8,
+   ARCHITECTURE (VLM name) and SECURITY (lockfile wording) were brought in line with the code. What remains:
+   the Makefile and `CLAUDE.md` still assume `.venv`, and `docs/DECISIONS.md` D4 is a historical record that names
+   `moondream` as it was at the time.
 6. **Redundant files for a conda-only setup:** `.venv/`, `start_ev.bat`, and the Makefile's `.venv` path.
 7. **Policy entries without tools:** `delete_file`, `move_file`, `send_message`, `run_shell` have levels in
    `policy.toml` but no registered implementation (see Tools).

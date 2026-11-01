@@ -6,11 +6,12 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
 
-from ev.audio.capture import MicError, Recorder, mic_blocks
+from ev.audio.capture import MicError, Recorder, SharedMic, mic_blocks
 from ev.audio.interrupt import InterruptMonitor
 from ev.audio.playback import Player
 from ev.audio.trigger import Hotkeys, WakeWord
@@ -35,7 +36,7 @@ from ev.tts.speaker import Speaker
 log = get_logger("app")
 
 # Whisper tends to invent these from room noise; in a follow-up window they mean "nobody spoke".
-_NOISE = re.compile(r"^\W*(you|bye|thanks for watching|thank you for watching)\W*$", re.I)
+_NOISE = re.compile(r"^\W*(you|bye|(?:u+|a+|e+)?[hm]+|um+|uh+|er+|thanks for watching|thank you for watching)\W*$", re.I)
 # The user is wrapping up: answer, but don't keep the mic open afterwards.
 _WRAP_UP = re.compile(r"^\W*(no,? )?(thanks|thank you|that'?s all|that'?s it|nothing|nope|never ?mind|goodbye|bye|stop)\b", re.I)
 
@@ -73,6 +74,7 @@ class EVApp:
         self._following_up = False                        # True while the follow-up window is listening
         self._interrupted = threading.Event()             # the user talked over EV's reply
         self._carry: list[np.ndarray] = []                # mic blocks captured while interrupting, fed to the next recording
+        self._mic: SharedMic | None = None                # one stream for the whole conversation (conversation.continuous_mic)
         self._out_level = 0.0
         self.hotkeys = Hotkeys(cfg, {
             "push_to_talk": self.on_trigger, "kill_switch": self.kill,
@@ -109,7 +111,7 @@ class EVApp:
 
         self.registry.register(Tool(
             "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
-            {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",)))
+            {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True))
 
     def _show(self, who: str, text: str, append: bool = False) -> None:
         """Put a line of the conversation on the pill's text card (only does anything in display mode)."""
@@ -161,11 +163,28 @@ class EVApp:
             log.warning("wake word is off; push-to-talk (%s) still works", self.cfg["hotkeys"]["push_to_talk"])
 
     def _warm(self) -> None:
-        try:
-            self.stt.load()
-            self.client.warm_up()
-        except Exception:
-            log.warning("warm-up incomplete", exc_info=True)
+        """Load and exercise every slow part at once (speech model, voice, LLM prompt cache, app list) so the first
+        request after start-up isn't the one that pays for them."""
+        from ev.tools import system
+
+        def run(label: str, fn: Any) -> None:
+            t0 = time.perf_counter()
+            try:
+                fn()
+                log.info("warm: %s ready in %.1fs", label, time.perf_counter() - t0)
+            except Exception:
+                log.warning("warm-up of %s incomplete", label, exc_info=True)
+
+        jobs = [("speech model", self.stt.warm),
+                ("llm", self.brain.warm),
+                ("app list", system.warm_app_index)]
+        if self.speaker:
+            jobs.append(("voice", self.speaker.warm))
+        threads = [threading.Thread(target=run, args=job, name=f"warm-{job[0]}", daemon=True) for job in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
     def _init_speaker(self) -> None:
         try:
@@ -272,7 +291,7 @@ class EVApp:
 
             def listen() -> None:
                 try:
-                    audio = self.recorder.record(mic_blocks(self.cfg, stop.is_set), wait_for_speech_s=timeout)
+                    audio = self.recorder.record(self._blocks(self.cfg, stop.is_set), wait_for_speech_s=timeout)
                     if audio is not None and not stop.is_set():
                         said = self.stt.transcribe(audio).text
                         self._show("user", said)
@@ -341,6 +360,27 @@ class EVApp:
         except Exception:
             log.exception("tray unavailable")
 
+    def _blocks(self, cfg: Config, stop: Callable[[], bool]) -> Iterator[np.ndarray]:
+        """Mic blocks for whoever is listening: the conversation's shared stream if one is open, else a stream of its own."""
+        mic = self._mic
+        return mic.blocks(stop) if mic is not None and mic.is_open else mic_blocks(cfg, stop)
+
+    def _open_shared_mic(self) -> None:
+        if not self.cfg.raw.get("conversation", {}).get("continuous_mic", False) or self._mic is not None:
+            return
+        mic = SharedMic(self.cfg)
+        try:
+            mic.open()
+        except MicError as e:
+            log.warning("continuous mic unavailable (%s); using one stream per turn", e)
+            return
+        self._mic = mic
+
+    def _close_shared_mic(self) -> None:
+        mic, self._mic = self._mic, None
+        if mic is not None:
+            mic.close()
+
     # ---- the core loop for one interaction
     def on_trigger(self) -> None:
         if self.paused or self.muted or self._confirming:
@@ -370,32 +410,41 @@ class EVApp:
         conv = self.cfg["conversation"] if "conversation" in self.cfg.raw else {}
         max_turns = int(conv.get("followup_max_turns", 8))
         wait: float | None = 6.0
-        for n in range(max_turns):
-            self._following_up = n > 0
-            wait = self._one_turn(wait or 6.0, followup=n > 0)
-            if wait is None or self._abort.is_set():
-                break
-            if not self._interrupted.is_set():            # after an interruption the user is already talking
-                time.sleep(0.3)                           # let the speaker tail die so EV doesn't hear itself
+        self._open_shared_mic()                           # stays open across the turns below, closed before the wake word resumes
+        try:
+            for n in range(max_turns):
+                self._following_up = n > 0
+                wait = self._one_turn(wait or 6.0, followup=n > 0, turn=n)
+                if wait is None or self._abort.is_set():
+                    break
+                if not self._interrupted.is_set():        # after an interruption the user is already talking
+                    time.sleep(float(conv.get("turn_gap_ms", 300)) / 1000)   # let the speaker tail die so EV doesn't hear itself
+        finally:
+            self._close_shared_mic()
         self._following_up = False
         if self.sm.state is State.SPEAKING:               # conversation ended right after a reply; wake word resumes on IDLE
             self.sm.to(State.IDLE, force=True)
 
-    def _followup_wait(self, heard: str, reply: str) -> float | None:
-        """Seconds to keep listening after this reply, or None to end the conversation."""
+    def _followup_wait(self, heard: str, reply: str, turn: int = 0) -> float | None:
+        """Seconds to keep listening after this reply, or None to end the conversation.
+
+        The deeper into a back-and-forth, the more patient EV is (followup_patience_s per turn, up to
+        followup_window_max_s): people in the middle of a conversation take longer to answer, and re-saying the wake
+        word mid-flow is what makes an assistant feel like a walkie-talkie."""
         conv = self.cfg.raw.get("conversation", {})
         if not conv.get("followup_enabled", True) or _WRAP_UP.match(heard):
             return None
-        if reply.rstrip().endswith("?"):
-            return float(conv.get("followup_question_window_s", 12))
-        return float(conv.get("followup_window_s", 7))
+        base = float(conv.get("followup_question_window_s", 12) if reply.rstrip().endswith("?")
+                     else conv.get("followup_window_s", 7))
+        extra = float(conv.get("followup_patience_s", 0)) * turn
+        return min(base + extra, max(base, float(conv.get("followup_window_max_s", base))))
 
     def _start_monitor(self) -> InterruptMonitor | None:
         conv = self.cfg.raw.get("conversation", {})
         if not conv.get("voice_interrupt", True) or not self.speaker:
             return None
         mon = InterruptMonitor(self.cfg, make_vad("silero", self.cfg["audio"]["vad_aggressiveness_threshold"]),
-                               lambda: self._out_level, self._on_talk_over, mic_blocks)
+                               lambda: self._out_level, self._on_talk_over, self._blocks)
         mon.start()
         return mon
 
@@ -405,13 +454,14 @@ class EVApp:
         if self.speaker:
             self.speaker.stop()
 
-    def _one_turn(self, wait_s: float = 6.0, followup: bool = False) -> float | None:
+    def _one_turn(self, wait_s: float = 6.0, followup: bool = False, turn: int = 0) -> float | None:
         """Listen, think, speak. Returns the follow-up listening window in seconds, or None if we're done."""
         self.sm.to(State.LISTENING)
+        self.brain.rewarm_if_cold()                       # reload the model while the user is still talking
         carried, self._carry = self._carry, []
         self._interrupted.clear()
         try:
-            audio = self.recorder.record(itertools.chain(carried, mic_blocks(self.cfg, lambda: False)),
+            audio = self.recorder.record(itertools.chain(carried, self._blocks(self.cfg, lambda: False)),
                                          wait_for_speech_s=wait_s)
         except MicError:
             self.sm.to(State.ERROR, force=True)
@@ -463,4 +513,4 @@ class EVApp:
         if res.error or self._abort.is_set():
             self.sm.to(State.IDLE, force=True)
             return None
-        return self._followup_wait(text, res.text)
+        return self._followup_wait(text, res.text, turn)

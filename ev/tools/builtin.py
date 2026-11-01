@@ -148,7 +148,7 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
 
     def media_control(action: str) -> ToolResult:
         system.press_media_key(action)
-        return ToolResult(True, f"Done: {action.replace('_', ' ')}.")
+        return ToolResult(True, _MEDIA_SAID.get(action, "Done."))
 
     def set_volume(level: int = -1, direction: str = "") -> ToolResult:
         if direction in ("up", "down"):
@@ -221,50 +221,52 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         return ToolResult(True, "Noted.")
 
     S = "string"
-    reg.register(Tool("get_time_date", "Get the current time and date.", {}, get_time_date))
+    reg.register(Tool("get_time_date", "Get the current time and date.", {}, get_time_date, direct=True))
     reg.register(Tool("open_app", "Open an application by name. admin only if asked for administrator rights.",
                       {"name": {"type": S, "description": "App name, e.g. Spotify", "maxLength": 60},
                        "admin": {"type": "boolean"}},
-                      open_app, ("name",), timeout_s=20))
+                      open_app, ("name",), timeout_s=20, direct=True))
     reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one.",
                       {"site": {"type": S, "description": "youtube, github, a domain...", "maxLength": 60},
                        "query": {"type": S, "maxLength": 200},
                        "url": {"type": S, "description": "only if the user gave an address", "maxLength": 500},
                        "browser": {"type": S, "maxLength": 20}},
-                      open_website, timeout_s=15))
+                      open_website, timeout_s=15, direct=True))
     reg.register(Tool("close_app", "Close an app by name, or 'this' for the front window. force only for force quit or kill.",
                       {"name": {"type": S, "maxLength": 60},
                        "force": {"type": "boolean"}},
-                      close_app, ("name",), timeout_s=15))
+                      close_app, ("name",), timeout_s=15, direct=True))
     reg.register(Tool("set_timer", "Start a countdown timer.", {
         "minutes": {"type": "number", "minimum": 0, "maximum": 1440},
         "seconds": {"type": "integer", "minimum": 0, "maximum": 86400},
-        "label": {"type": S, "maxLength": 40}}, set_timer))
+        "label": {"type": S, "maxLength": 40}}, set_timer, direct=True))
     reg.register(Tool("set_reminder", "Remind the user of something later. Use in_minutes or at (like 3:30 pm).", {
         "text": {"type": S, "maxLength": 200},
         "in_minutes": {"type": "number", "minimum": 0, "maximum": 525600},
-        "at": {"type": S, "maxLength": 12}}, set_reminder, ("text",)))
+        "at": {"type": S, "maxLength": 12}}, set_reminder, ("text",), direct=True))
     reg.register(Tool("media_control", "Control media playback.", {
         "action": {"type": S, "enum": ["play_pause", "next", "previous", "stop"]}},
-        media_control, ("action",)))
+        media_control, ("action",), direct=True))
     reg.register(Tool("set_volume", "Change system volume: set level 0-100, or direction up/down/mute.", {
         "level": {"type": "integer", "minimum": 0, "maximum": 100},
-        "direction": {"type": S, "enum": ["up", "down", "mute"]}}, set_volume))
+        "direction": {"type": S, "enum": ["up", "down", "mute"]}}, set_volume, direct=True))
     reg.register(Tool("get_weather", "Get the live weather for a city, today or tomorrow. Leave place empty for the user's home city.", {
         "place": {"type": S, "maxLength": 60},
-        "day": {"type": S, "enum": ["today", "tomorrow"]}}, get_weather, timeout_s=20))
+        "day": {"type": S, "enum": ["today", "tomorrow"]}}, get_weather, timeout_s=20, direct=True))
     reg.register(Tool("web_search", "Search the web for news, facts and other current information (not weather).",
                       {"query": {"type": S, "maxLength": 200}}, web_search, ("query",), timeout_s=30))
     reg.register(Tool("remember_fact", "Save a fact about the user for later.", {
         "key": {"type": S, "description": "short label, e.g. favorite_color", "maxLength": 60},
-        "value": {"type": S, "maxLength": 300}}, remember_fact, ("key", "value")))
+        "value": {"type": S, "maxLength": 300}}, remember_fact, ("key", "value"), direct=True))
     reg.register(Tool("forget_fact", "Delete a saved fact about the user.",
-                      {"key": {"type": S, "maxLength": 60}}, forget_fact, ("key",)))
+                      {"key": {"type": S, "maxLength": 60}}, forget_fact, ("key",), direct=True))
     reg.register(Tool("take_note", "Save a quick note for the user.",
-                      {"text": {"type": S, "maxLength": 1000}}, take_note, ("text",)))
+                      {"text": {"type": S, "maxLength": 1000}}, take_note, ("text",), direct=True))
     return reg
 
 
+_MEDIA_SAID = {"play_pause": "Okay, toggled playback.", "next": "Skipping ahead.", "previous": "Going back a track.",
+               "stop": "Stopped."}
 _SITE_LABELS = {"youtube": "YouTube", "github": "GitHub", "gmail": "Gmail", "linkedin": "LinkedIn", "maps": "Google Maps",
                 "stackoverflow": "Stack Overflow", "duckduckgo": "DuckDuckGo", "twitter": "X", "google": "Google",
                 "wikipedia": "Wikipedia", "reddit": "Reddit", "amazon": "Amazon"}

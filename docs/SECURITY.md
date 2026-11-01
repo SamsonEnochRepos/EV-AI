@@ -34,7 +34,13 @@ Everything else the user asks for (open or close apps politely, open sites, sear
 | Runaway agent loop | Model keeps acting | 8-step cap, identical-action detection, kill switch checked each step, per-tool timeouts | Slow vision steps can take seconds each |
 | Accidental destructive action | Misheard command | Confirm class + readback; blocked patterns; sandbox paths | Misheard "yes" |
 | Mic misuse | Always-listening | Push-to-talk default; stream open only during an utterance; mute in tray; wake-word mode is opt-in (and keeps the mic open while idle by design) | In wake-word mode the mic is open locally (never stored/sent) |
-| Supply chain | Malicious package or model | Well-known packages, pinned in the lockfile, `pip-audit`, models only from Ollama library and Hugging Face with checksums recorded in `models/checksums.json` | PyPI compromise of a pinned release before audit |
+| Supply chain | Malicious package or model | Well-known packages, version constraints in `pyproject.toml` (no lockfile yet), `pip-audit`, models only from Ollama library and Hugging Face with checksums recorded in `models/checksums.json` | PyPI compromise of a pinned release before audit |
 | Data exfiltration | Network egress | No telemetry; only egress is DuckDuckGo search and Open-Meteo weather (both optional, see `[web]` in `ev.toml`) and package/model downloads | DuckDuckGo sees the query text; Open-Meteo sees only the city name |
 
 See `docs/EVAL_REPORT.md` for the security scorecard with test results.
+
+## Latency features and the gate (D21)
+* **Parallel tool batches** only cover side-effect-free tools, and every call in the batch is validated and gated one at a time, on the calling thread, *before* any of them runs. A denied call never runs; the model is told which one was denied.
+* **Direct tool replies** (off by default) speak a tool's own result line. They are never used for `untrusted` results (web, screen, files), which always go back to the model wrapped as data.
+* **Fillers and smalltalk** are fixed strings chosen by the system, not text from the model, the screen or the web, and they trigger no tool.
+* **Prompt-cache warm-up** sends the persona, remembered facts and tool list to the local Ollama on `127.0.0.1` only, like any turn.

@@ -29,6 +29,7 @@ class Tool:
     func: Callable[..., ToolResult]
     required: tuple[str, ...] = ()
     timeout_s: float = 10.0
+    direct: bool = False        # the result message is already a finished spoken sentence: say it, skip the model's re-phrasing
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -85,7 +86,8 @@ def validate_args(tool: Tool, args: Any) -> tuple[dict[str, Any] | None, str]:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="tool")
+        # Room for a parallel batch plus the screen agent's nested calls; a timed-out tool keeps its worker until it returns.
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="tool")
         self._schemas: list[dict[str, Any]] | None = None  # cached (schema caching optimisation)
 
     def register(self, tool: Tool) -> None:
@@ -106,7 +108,15 @@ class ToolRegistry:
         return self._schemas
 
     def run(self, tool: Tool, args: dict[str, Any]) -> ToolResult:
-        fut = self._pool.submit(tool.func, **args)
+        return self._collect(tool, self._pool.submit(tool.func, **args))
+
+    def run_many(self, jobs: list[tuple[Tool, dict[str, Any]]]) -> list[ToolResult]:
+        """Run independent tools at the same time. Results come back in the order of `jobs`."""
+        futs = [self._pool.submit(t.func, **a) for t, a in jobs]
+        return [self._collect(t, f) for (t, _), f in zip(jobs, futs, strict=True)]
+
+    @staticmethod
+    def _collect(tool: Tool, fut: concurrent.futures.Future[ToolResult]) -> ToolResult:
         try:
             return fut.result(timeout=tool.timeout_s)
         except concurrent.futures.TimeoutError:

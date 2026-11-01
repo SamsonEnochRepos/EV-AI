@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -49,6 +50,100 @@ def mic_blocks(cfg: Config, stop: Callable[[], bool]) -> Iterator[np.ndarray]:
     finally:
         stream.stop()
         stream.close()
+
+
+class SharedMic:
+    """One microphone stream kept open for a whole conversation, fanned out to whoever is listening.
+
+    The per-turn `mic_blocks` closes and reopens the device between turns (about 100-200 ms) and the barge-in monitor
+    and the recorder each open their own stream, so anything said at the hand-off is lost. Here the stream stays open;
+    `blocks()` subscribes a listener (the monitor while EV speaks, the recorder while it listens) and unsubscribes when
+    that listener stops. Blocks are only delivered to current subscribers, nothing is buffered or stored.
+    """
+
+    def __init__(self, cfg: Config):
+        a = cfg["audio"]
+        self.sr = int(a["sample_rate"])
+        self.block = int(self.sr * a["block_ms"] / 1000)
+        self.device = a.get("input_device") or None
+        self._subs: list[queue.Queue[np.ndarray]] = []
+        self._lock = threading.Lock()
+        self._stream: Any = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._stream is not None
+
+    def open(self) -> None:
+        if self._stream is not None:
+            return
+        import sounddevice as sd  # type: ignore[import-untyped]
+
+        def cb(indata: np.ndarray, frames: int, t: Any, status: Any) -> None:
+            self._publish(indata[:, 0].copy())
+
+        try:
+            stream = sd.InputStream(samplerate=self.sr, channels=1, dtype="int16", blocksize=self.block,
+                                    device=self.device, callback=cb)
+            stream.start()
+        except Exception as e:
+            raise MicError(f"can't open microphone: {e}") from e
+        self._stream = stream
+
+    def close(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.stop()
+            stream.close()
+        with self._lock:
+            self._subs.clear()
+
+    def _publish(self, blk: np.ndarray) -> None:
+        with self._lock:
+            for q in self._subs:
+                try:
+                    q.put_nowait(blk)
+                except queue.Full:
+                    pass                              # a listener that stopped reading just misses blocks
+
+    def blocks(self, stop: Callable[[], bool]) -> MicListener:
+        """Blocks from this moment on (int16 mono) until stop() or close(). Same shape as mic_blocks().
+
+        Subscribes immediately rather than at the first read, so nothing between creating the listener and reading it is lost."""
+        q: queue.Queue[np.ndarray] = queue.Queue(maxsize=200)
+        with self._lock:
+            self._subs.append(q)
+        return MicListener(self, q, stop)
+
+    def _unsubscribe(self, q: queue.Queue[np.ndarray]) -> None:
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
+
+
+class MicListener:
+    """One listener's view of a SharedMic. Iterate it for blocks; close() (or dropping it) unsubscribes."""
+
+    def __init__(self, mic: SharedMic, q: queue.Queue[np.ndarray], stop: Callable[[], bool]):
+        self._mic, self._q, self._stop = mic, q, stop
+
+    def __iter__(self) -> MicListener:
+        return self
+
+    def __next__(self) -> np.ndarray:
+        while not self._stop():
+            try:
+                return self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+        self.close()
+        raise StopIteration
+
+    def close(self) -> None:
+        self._mic._unsubscribe(self._q)
+
+    def __del__(self) -> None:
+        self.close()
 
 
 class Recorder:

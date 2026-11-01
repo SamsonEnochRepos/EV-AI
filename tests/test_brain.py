@@ -56,6 +56,7 @@ def test_fast_path_bypasses_llm(cfg, memory, policy, registry):
 def test_tool_call_then_reply(cfg, memory, policy, registry):
     fake = FakeOllama([tool_reply("remember_fact", {"key": "dog", "value": "Biscuit"}), text_reply("Got it, Biscuit it is.")])
     brain, _ = make(cfg, memory, policy, registry, fake)
+    brain.direct_replies = False                        # let the model phrase the answer (the default speaks the tool's own line)
     res = brain.respond("my dog is Biscuit remember that")
     assert memory.recall("dog") == "Biscuit"
     assert res.tool_log[0]["ok"] and "Biscuit" in res.text
@@ -133,7 +134,7 @@ def test_ollama_down_gives_spoken_message(cfg, memory, policy, registry):
     client = OllamaClient(cfg, transport=httpx.MockTransport(boom))
     brain = Brain(cfg, client, memory, registry, SafetyGate(policy), persona="x")
     spoken = []
-    res = brain.respond("hello there", on_sentence=spoken.append)
+    res = brain.respond("how was your day", on_sentence=spoken.append)
     assert res.error == "OllamaDown" and "Ollama" in spoken[0]
     with pytest.raises(OllamaDown):
         client.available_models()

@@ -8,6 +8,8 @@ except the place name, which is reduced to letters and punctuation first.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -23,6 +25,23 @@ _WMO = {
     81: "showery", 82: "very showery", 85: "snow showers", 86: "snow showers",
     95: "thunderstorms", 96: "thunderstorms with hail", 99: "thunderstorms with hail",
 }
+
+
+# Reused connection (skips two TLS handshakes per question) and short caches. Only used when no client is passed in.
+_GEO_TTL_S = 24 * 3600          # a city doesn't move
+_FORECAST_TTL_S = 300
+_shared: httpx.Client | None = None
+_shared_lock = threading.Lock()
+_geo: dict[str, tuple[float, dict[str, Any]]] = {}
+_forecast: dict[tuple[float, float, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _shared_client(timeout: float) -> httpx.Client:
+    global _shared
+    with _shared_lock:
+        if _shared is None:
+            _shared = httpx.Client(timeout=timeout, follow_redirects=False)
+        return _shared
 
 
 class WeatherError(RuntimeError):
@@ -43,29 +62,42 @@ def get_weather(place: str, day: str = "today", units: str = "metric", timeout: 
     if not place:
         raise WeatherError("Which city do you want the weather for?")
     imperial = units == "imperial"
-    client = http or httpx.Client(timeout=timeout, follow_redirects=False)
+    cached = http is None
+    client = http or _shared_client(timeout)
+    t_now = time.monotonic()
     try:
-        try:
-            g = client.get(GEOCODE_URL, params={"name": place.split(",")[0], "count": 1, "language": "en", "format": "json"})
+        geo_key = place.split(",")[0].lower()
+        hit = _geo.get(geo_key) if cached else None
+        if hit and t_now - hit[0] < _GEO_TTL_S:
+            loc = hit[1]
+        else:
+            g = client.get(GEOCODE_URL, params={"name": place.split(",")[0], "count": 1, "language": "en", "format": "json"},
+                           timeout=timeout)
             g.raise_for_status()
             hits = g.json().get("results") or []
             if not hits:
                 raise WeatherError(f"I couldn't find a place called {place}.")
             loc = hits[0]
-            name = _clean_place(str(loc.get("name", place))) or place
+            if cached:
+                _geo[geo_key] = (t_now, loc)
+        name = _clean_place(str(loc.get("name", place))) or place
+        fkey = (float(loc["latitude"]), float(loc["longitude"]), units)
+        fhit = _forecast.get(fkey) if cached else None
+        if fhit and t_now - fhit[0] < _FORECAST_TTL_S:
+            data = fhit[1]
+        else:
             f = client.get(FORECAST_URL, params={
-                "latitude": float(loc["latitude"]), "longitude": float(loc["longitude"]), "timezone": "auto",
+                "latitude": fkey[0], "longitude": fkey[1], "timezone": "auto",
                 "current": "temperature_2m,apparent_temperature,weather_code",
                 "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
                 "forecast_days": 2,
-                **({"temperature_unit": "fahrenheit"} if imperial else {})})
+                **({"temperature_unit": "fahrenheit"} if imperial else {})}, timeout=timeout)
             f.raise_for_status()
             data = f.json()
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-            raise WeatherError("I couldn't reach the weather service just now.") from e
-    finally:
-        if http is None:
-            client.close()
+            if cached:
+                _forecast[fkey] = (t_now, data)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
+        raise WeatherError("I couldn't reach the weather service just now.") from e
 
     unit = "Fahrenheit" if imperial else "Celsius"
     try:

@@ -26,6 +26,7 @@ class Speaker:
         self._q: queue.Queue[str | None] = queue.Queue()
         self._gen = 0                      # bumped on stop(); stale work is discarded
         self._lock = threading.Lock()
+        self._synth_lock = threading.Lock()  # one synthesis at a time: the speaker thread and warm() share the voice model
         self._busy = threading.Event()
         self._pending = 0
         self._idle = threading.Event()
@@ -43,6 +44,12 @@ class Speaker:
             self._idle.clear()
             gen = self._gen
         self._q.put(f"{gen}\x00{s}")
+
+    def warm(self) -> None:
+        """Synthesize a short phrase (discarded) so the first spoken reply skips the voice model's start-up cost."""
+        with self._synth_lock:
+            for _ in self.engine.synthesize("Hi there."):
+                pass
 
     def stop(self) -> None:
         with self._lock:
@@ -81,13 +88,14 @@ class Speaker:
                     continue
                 t0 = time.perf_counter()
                 first = True
-                for chunk in self.engine.synthesize(text):
-                    if int(gen_s) != self._gen:
-                        break
-                    if first:
-                        self.first_chunk_ms.append((time.perf_counter() - t0) * 1000)
-                        first = False
-                    self.player.play(chunk, self.engine.sample_rate)
+                with self._synth_lock:
+                    for chunk in self.engine.synthesize(text):
+                        if int(gen_s) != self._gen:
+                            break
+                        if first:
+                            self.first_chunk_ms.append((time.perf_counter() - t0) * 1000)
+                            first = False
+                        self.player.play(chunk, self.engine.sample_rate)
                 if self.pause_ms and int(gen_s) == self._gen:
                     self.player.play(np.zeros(self.engine.sample_rate * self.pause_ms // 1000, np.float32),
                                      self.engine.sample_rate)

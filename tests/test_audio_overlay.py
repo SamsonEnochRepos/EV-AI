@@ -202,3 +202,59 @@ def test_scheduler_thread_fires(memory):
     sc.stop()
     assert fired and "tea" in fired[0]
     assert threading.active_count() >= 1
+
+
+# ---- SharedMic: one stream, many listeners
+def test_shared_mic_fans_out_to_every_listener_and_unsubscribes():
+    import threading as th
+
+    from ev.audio.capture import SharedMic
+    from ev.core.config import load_config
+
+    mic = SharedMic(load_config())
+    stop_a, stop_b = th.Event(), th.Event()
+    got_a, got_b = [], []
+    ga, gb = mic.blocks(stop_a.is_set), mic.blocks(stop_b.is_set)
+
+    def drain(gen, out, n):
+        for blk in gen:
+            out.append(int(blk[0]))
+            if len(out) >= n:
+                return
+
+    ta = th.Thread(target=drain, args=(ga, got_a, 3))
+    tb = th.Thread(target=drain, args=(gb, got_b, 2))
+    ta.start(), tb.start()
+    for _ in range(100):                                   # both generators must have subscribed before we publish
+        if len(mic._subs) == 2:
+            break
+        time.sleep(0.01)
+    for i in range(3):
+        mic._publish(np.full(480, i, np.int16))
+    ta.join(2), tb.join(2)
+    assert got_a == [0, 1, 2] and got_b == [0, 1]          # same blocks, same order, to both
+    ga.close(), gb.close()
+    assert mic._subs == []                                 # a finished listener leaves no queue behind
+
+
+def test_shared_mic_only_delivers_blocks_published_after_subscribing():
+    from ev.audio.capture import SharedMic
+    from ev.core.config import load_config
+
+    mic = SharedMic(load_config())
+    mic._publish(np.ones(480, np.int16))                   # nobody listening: dropped, never stored
+    stop = [False]
+    gen = mic.blocks(lambda: stop[0])                      # subscribes now, even before the first read
+    mic._publish(np.full(480, 7, np.int16))
+    assert int(next(gen)[0]) == 7
+    stop[0] = True
+    assert list(gen) == [] and mic._subs == []             # stopping ends the iteration and unsubscribes
+
+
+def test_dropping_an_unread_listener_unsubscribes_it():
+    from ev.audio.capture import SharedMic
+    from ev.core.config import load_config
+
+    mic = SharedMic(load_config())
+    mic.blocks(lambda: False)                              # never iterated, immediately garbage
+    assert mic._subs == []

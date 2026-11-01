@@ -1,7 +1,9 @@
 """Deterministic intent matching for common commands. Bypasses the LLM for speed/reliability."""
 from __future__ import annotations
 
+import random
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -132,6 +134,33 @@ def _close_command(t: str) -> FastMatch | None:
     if m["f"] or m["v"] == "kill":
         args["force"] = True
     return FastMatch("close_app", args, "close")
+
+
+# Pure pleasantries get an instant, varied reply with no model call. Only whole utterances match, and never
+# "yes/ok/sure" (those can be answers to a question EV just asked, so they need the model and the history).
+_NAME = r"(?:\s+(?:ev|evie))?"
+_SMALLTALK: list[tuple[str, tuple[str, ...]]] = [
+    (rf"(?:thanks|thank you|thx|cheers)(?:\s+(?:so much|a lot|a ton|very much|again))?{_NAME}",
+     ("Anytime!", "You got it.", "Happy to help.", "Of course!", "No problem.", "Anytime, really.")),
+    (rf"(?:hi|hello|hey|hiya|howdy|yo|heya)(?:\s+there)?{_NAME}",
+     ("Hey! What's up?", "Hi there. What do you need?", "Hey you. What's going on?", "Hello! I'm all ears.")),
+    (rf"good\s+(?:morning|afternoon|evening){_NAME}",
+     ("Hey, good to hear from you. What's the plan?", "Hi! What are we getting into?", "Hey there. What do you need?")),
+    (rf"(?:good\s?night|night night|nighty night|sleep well){_NAME}",
+     ("Night! Sleep well.", "Goodnight! Catch you tomorrow.", "Sleep tight!")),
+    (rf"(?:bye|goodbye|bye bye|see you(?: later| soon| tomorrow)?|talk to you later|catch you later){_NAME}",
+     ("Bye! Talk soon.", "See you!", "Catch you later.", "Later!")),
+]
+_SMALLTALK_RES = [(re.compile(_PRE + p + _POST), replies) for p, replies in _SMALLTALK]
+
+
+def match_smalltalk(text: str, pick: Callable[[tuple[str, ...]], str] = random.choice) -> str | None:
+    """A ready-made spoken reply for a bare "thanks" / "hello" / "goodbye", or None."""
+    t = re.sub(r"\s+", " ", text.strip().lower())
+    for rx, replies in _SMALLTALK_RES:
+        if rx.match(t):
+            return pick(replies)
+    return None
 
 
 def match_fast(text: str) -> FastMatch | None:

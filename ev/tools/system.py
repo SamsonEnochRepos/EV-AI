@@ -117,15 +117,40 @@ def _match(entries: dict[str, Any], want: str, loose: bool) -> Any | None:
     return entries[close[0]] if close else None
 
 
+_INDEX_TTL_S = 300
+_lnk_cache: tuple[float, tuple[str, ...], dict[str, Path]] = (0.0, (), {})
+
+
 def _lnk_entries() -> dict[str, Path]:
+    """Start-menu shortcuts by name. The folder walk costs 50-300 ms and a launch asks several times, so it is
+    cached for five minutes (and rebuilt at once if an app can't be found; see launch_app)."""
+    global _lnk_cache
+    dirs = _start_menu_dirs()
+    key = tuple(str(d) for d in dirs)
+    if _lnk_cache[1] == key and time.monotonic() - _lnk_cache[0] < _INDEX_TTL_S:
+        return _lnk_cache[2]
     entries: dict[str, Path] = {}
-    for d in _start_menu_dirs():
+    for d in dirs:
         if d.exists():
             for lnk in d.rglob("*.lnk"):
                 stem = _norm(lnk.stem)
                 if stem and "uninstall" not in stem:
                     entries.setdefault(stem, lnk)
+    _lnk_cache = (time.monotonic(), key, entries)
     return entries
+
+
+def forget_app_index() -> None:
+    """Drop the cached app lists so the next lookup sees apps installed in the last few minutes."""
+    global _lnk_cache, _store_cache
+    _lnk_cache = (0.0, (), {})
+    _store_cache = (0.0, {})
+
+
+def warm_app_index() -> None:
+    """Build both app lists ahead of time (the Store list starts PowerShell, 1-2 s) so the first "open X" is quick."""
+    _lnk_entries()
+    _store_entries()
 
 
 _store_cache: tuple[float, dict[str, tuple[str, str]]] = (0.0, {})
@@ -182,6 +207,16 @@ def launch_app(name: str, allow_start_menu: bool = True, elevate: bool = False) 
     """Launch an app by friendly name. Returns a short description of what was launched.
 
     elevate=True starts it as administrator; callers only pass it after the user has confirmed out loud."""
+    try:
+        return _launch(name, allow_start_menu, elevate)
+    except FileNotFoundError:
+        if not allow_start_menu or (_lnk_cache[0] == 0.0 and _store_cache[0] == 0.0):
+            raise
+        forget_app_index()                      # maybe it was installed after the lists were cached: look once more
+        return _launch(name, allow_start_menu, elevate)
+
+
+def _launch(name: str, allow_start_menu: bool, elevate: bool) -> str:
     key = name.strip().lower()
     if key in KNOWN_APPS:
         argv = KNOWN_APPS[key]

@@ -73,6 +73,7 @@ def app(tmp_path, monkeypatch):
 
 def use_fake_llm(a, fake):
     a.client = OllamaClient(a.cfg, transport=fake.transport())
+    a.client._last_used = time.monotonic()        # warm: no background re-warm request eating a scripted reply
     a.brain.client = a.client
 
 
@@ -389,3 +390,83 @@ def test_display_mode_is_off_by_default_and_remembered(app, tmp_path):
         assert again.display_mode is True
     finally:
         again.shutdown()
+
+
+# ---- conversation feel: patience grows with the back-and-forth; filler noise is dropped; smalltalk is instant
+def test_followup_window_grows_with_the_conversation(app):
+    app.cfg.raw["conversation"].update(followup_enabled=True, followup_window_s=7, followup_patience_s=2,
+                                       followup_window_max_s=12, followup_question_window_s=12)
+    waits = [app._followup_wait("what's up", "Not much.", turn) for turn in range(5)]
+    assert waits == [7, 9, 11, 12, 12]                       # +2 s per turn, capped at followup_window_max_s
+    assert app._followup_wait("what's up", "Want me to?", 3) == 12      # a question already gets the long window
+    assert app._followup_wait("thanks", "Anytime.", 2) is None          # wrapping up still ends it
+
+
+def test_hesitation_sounds_in_a_followup_are_not_a_request(app, monkeypatch):
+    app.cfg.raw["conversation"]["followup_enabled"] = True
+    _mic_script(monkeypatch, ["speech", "speech", "silence"])
+    heard = iter(["what time is it", "hmm"])
+    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    use_fake_llm(app, FakeOllama([text_reply("should never be asked")]))
+    app.on_trigger()
+    assert len(app.engine.said) == 1                         # only the time answer; "hmm" never reached the model
+    assert app.sm.state is State.IDLE
+
+
+def test_thanks_gets_an_instant_reply_without_the_model(app):
+    fake = FakeOllama([text_reply("unused")])
+    use_fake_llm(app, fake)
+    app.heard = "thanks"
+    app.on_trigger()
+    assert fake.requests == [] and len(app.engine.said) == 1
+
+
+# ---- continuous mic: one stream for the whole conversation
+class FakeSharedMic:
+    instances: list = []
+
+    def __init__(self, cfg):
+        self.is_open = False
+        self.opened = self.closed = 0
+        self.subscriptions = 0
+        FakeSharedMic.instances.append(self)
+
+    def open(self):
+        self.is_open, self.opened = True, self.opened + 1
+
+    def close(self):
+        self.is_open, self.closed = False, self.closed + 1
+
+    def blocks(self, stop):
+        self.subscriptions += 1
+        return speech_blocks()
+
+
+def test_continuous_mic_opens_once_per_conversation_and_closes_before_idle(app, monkeypatch):
+    FakeSharedMic.instances = []
+    monkeypatch.setattr("ev.app.SharedMic", FakeSharedMic)
+    monkeypatch.setattr("ev.app.mic_blocks", lambda cfg, stop: (_ for _ in ()).throw(AssertionError("per-turn stream used")))
+    app.cfg.raw["conversation"].update(continuous_mic=True, followup_enabled=True, followup_window_s=1, followup_max_turns=2)
+    app.on_trigger()
+    (mic,) = FakeSharedMic.instances
+    assert mic.opened == 1 and mic.closed == 1             # one open for both turns, closed when the conversation ended
+    assert mic.subscriptions == 2 and app._mic is None     # each turn's recorder subscribed to the same stream
+    assert app.sm.state is State.IDLE
+
+
+def test_continuous_mic_is_off_by_default(app, monkeypatch):
+    FakeSharedMic.instances = []
+    monkeypatch.setattr("ev.app.SharedMic", FakeSharedMic)
+    app.on_trigger()
+    assert FakeSharedMic.instances == []                   # default config keeps one stream per turn
+
+
+def test_continuous_mic_failure_falls_back_to_per_turn_streams(app, monkeypatch):
+    class Broken(FakeSharedMic):
+        def open(self):
+            raise MicError("busy")
+
+    monkeypatch.setattr("ev.app.SharedMic", Broken)
+    app.cfg.raw["conversation"]["continuous_mic"] = True
+    app.on_trigger()                                       # the patched per-turn mic still works
+    assert app.engine.said and app._mic is None

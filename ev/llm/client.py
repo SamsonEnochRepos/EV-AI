@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +56,7 @@ class OllamaClient:
         self.keep_alive = c["keep_alive"]
         self.think = c.get("think", False)
         self._cpu_until = 0.0     # monotonic time until which we run on CPU (set after a GPU out-of-memory error)
+        self._last_used = 0.0     # monotonic time of the last chat request (0 = never, or the model was unloaded since)
         self.http = httpx.Client(
             base_url=self.base, timeout=c["request_timeout_s"], transport=transport
         )
@@ -85,7 +86,8 @@ class OllamaClient:
         model: str | None = None,
         options: dict[str, Any] | None = None,
         keep_alive: str | None = None,
-    ) -> Iterator[ChatChunk]:
+    ) -> Generator[ChatChunk, None, None]:
+        self._last_used = time.monotonic()
         body: dict[str, Any] = {
             "model": model or self.model,
             "messages": messages,
@@ -114,7 +116,7 @@ class OllamaClient:
         body["options"]["num_gpu"] = 0
         yield from self._stream(body)
 
-    def _stream(self, body: dict[str, Any]) -> Iterator[ChatChunk]:
+    def _stream(self, body: dict[str, Any]) -> Generator[ChatChunk, None, None]:
         try:
             with self.http.stream("POST", "/api/chat", json=body) as r:
                 if r.status_code != 200:
@@ -152,14 +154,21 @@ class OllamaClient:
                 stats = ch.stats
         return ChatChunk("".join(text), calls, True, stats)
 
+    def is_cold(self, after_s: float) -> bool:
+        """True if the chat model's prompt cache is probably gone: never used, unloaded, or idle for `after_s`."""
+        return self._last_used == 0.0 or time.monotonic() - self._last_used > after_s
+
     def unload(self, model: str) -> None:
+        if model == self.model:
+            self._last_used = 0.0
         try:
             self.http.post("/api/generate", json={"model": model, "keep_alive": 0})
         except httpx.HTTPError:
             log.warning("unload of %s failed", model)
 
-    def warm_up(self) -> None:
-        self.chat([{"role": "user", "content": "hi"}], options={"num_predict": 1})
+    def warm_up(self, messages: list[dict[str, Any]] | None = None, tools: list[dict[str, Any]] | None = None) -> None:
+        """Load the model. With the real system prompt and tool list it also primes Ollama's prompt cache."""
+        self.chat(messages or [{"role": "user", "content": "hi"}], tools=tools, options={"num_predict": 1})
 
 
 def _args(a: Any) -> dict[str, Any]:

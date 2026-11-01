@@ -101,7 +101,7 @@ class STT:
         assert self._model is not None
         segs, _ = self._model.transcribe(
             x, language=self.c["language"], beam_size=self.c["beam_size"],
-            vad_filter=True, condition_on_previous_text=False,
+            vad_filter=True, condition_on_previous_text=False, without_timestamps=True,
             vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 250},
             temperature=[0.0, 0.2, 0.4],            # retry hotter only when the greedy pass looks like garbage
             no_speech_threshold=0.6, log_prob_threshold=-1.0, compression_ratio_threshold=2.4,
@@ -109,6 +109,16 @@ class STT:
         )
         text = fix_names(" ".join(s.text.strip() for s in segs).strip())
         return Transcript(text, time.perf_counter() - t0, audio_s)
+
+    def warm(self) -> None:
+        """Run one throwaway decode so the first real utterance doesn't pay the one-time start-up cost."""
+        self.load()
+        assert self._model is not None
+        noise = (np.random.default_rng(0).standard_normal(self.sr) * 0.01).astype(np.float32)
+        segs, _ = self._model.transcribe(noise, language=self.c["language"], beam_size=1, vad_filter=False,
+                                         without_timestamps=True)
+        for _ in segs:
+            pass
 
     def unload(self) -> None:
         with self._lock:

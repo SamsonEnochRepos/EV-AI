@@ -55,7 +55,7 @@ def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client
         return ToolResult(True, "Took a screenshot and saved it.", {"path": str(path)})
 
     reg.register(Tool("take_screenshot", "Take a screenshot of the screen and save it as an image file for the user.",
-                      {}, take_screenshot, timeout_s=15))
+                      {}, take_screenshot, timeout_s=15, direct=True))
     reg.register(Tool("read_screen", "Read the text currently visible on the user's screen.", {
         "method": {"type": "string", "enum": ["auto", "uia", "ocr"]}}, read_screen, timeout_s=20))
     reg.register(Tool("screenshot_describe", "Describe the screen visually (slow; use only if read_screen is not enough).", {
