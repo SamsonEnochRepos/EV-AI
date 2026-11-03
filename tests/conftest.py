@@ -19,6 +19,19 @@ def cfg():
     return load_config()
 
 
+@pytest.fixture(autouse=True)
+def _no_lookup_planner(request, monkeypatch):
+    """The planner is one extra model call before the main one; tests that script Ollama replies by position don't expect it.
+    A test that wants it asks for the `planner_on` fixture."""
+    if "planner_on" not in request.fixturenames:
+        monkeypatch.setattr("ev.llm.brain.Brain._plan_lookup", lambda self, text: None)
+
+
+@pytest.fixture
+def planner_on():
+    return True
+
+
 @pytest.fixture
 def policy():
     return Policy.load(ROOT / "config" / "policy.toml")
@@ -47,6 +60,7 @@ def gate(policy):
 
 
 @pytest.fixture
-def registry(cfg, memory, scheduler, policy) -> ToolRegistry:
-    ctx = ToolContext(cfg, memory, scheduler, policy, now=lambda: dt.datetime(2026, 1, 2, 15, 4))
+def registry(cfg, memory, scheduler, policy, tmp_path: Path) -> ToolRegistry:
+    ctx = ToolContext(cfg, memory, scheduler, policy, now=lambda: dt.datetime(2026, 1, 2, 15, 4),
+                      notes_dir=tmp_path / "notes")
     return build_tools(ctx)

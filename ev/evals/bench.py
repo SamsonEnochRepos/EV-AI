@@ -114,9 +114,35 @@ def bench_overlay(toolkit: str, seconds: float = 12.0) -> dict[str, Any]:
             "rss_mb_mean": statistics.mean(rss), "rss_mb_max": max(rss), "seconds": seconds}
 
 
+def bench_context(n: int = 50) -> dict[str, Any]:
+    """What the context snapshot costs per turn, signal by signal, with the real foreground window and real folders."""
+    from ev.context.snapshot import ContextSnapshot
+    from ev.core.config import load_config
+    from ev.safety.policy import Policy
+
+    cfg = load_config()
+    snap = ContextSnapshot(cfg, Policy.load(ROOT / "config" / "policy.toml", places=cfg.places()))
+    per: dict[str, list[float]] = {}
+    total: list[float] = []
+    for _ in range(n):
+        snap._files_cache = (-1e9, [])                      # the worst case: the folders are listed every time
+        snap._git_cache.clear()
+        t0 = time.perf_counter()
+        for s in snap.signals("battery file meeting branch commit", force=True):
+            per.setdefault(s.name, []).append(s.ms)
+        total.append((time.perf_counter() - t0) * 1000)
+    q = lambda xs, p: sorted(xs)[min(len(xs) - 1, int(len(xs) * p))]    # noqa: E731
+    out: dict[str, Any] = {"n": n, "total_median_ms": statistics.median(total), "total_p95_ms": q(total, 0.95),
+                           "total_max_ms": max(total)}
+    for name, xs in per.items():
+        out[f"{name}_median_ms"] = statistics.median(xs)
+        out[f"{name}_p95_ms"] = q(xs, 0.95)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["llm", "overlay"])
+    ap.add_argument("what", choices=["llm", "overlay", "context"])
     ap.add_argument("--models", nargs="*", default=["qwen2.5:3b", "llama3.2:latest", "qwen3:4b"])
     ap.add_argument("--ctx", nargs="*", type=int, default=[2048])
     ap.add_argument("--toolkits", nargs="*", default=["qt", "tk"])
@@ -125,6 +151,9 @@ def main() -> int:
     if a.what == "llm":
         res = [bench_llm(m, c) for m in a.models for c in a.ctx]
         out = RESULTS / "bench_llm.json"
+    elif a.what == "context":
+        res = [bench_context()]
+        out = RESULTS / "bench_context.json"
     else:
         res = [bench_overlay(t) for t in a.toolkits]
         out = RESULTS / "bench_overlay.json"

@@ -38,9 +38,7 @@ cfg = load_config()
 p = Pill(cfg)
 scale = 4
 for state, level in [('idle',0),('listening',0.15),('listening',0.9),('transcribing',0),('thinking',0),('acting',0),('speaking',0.8),('paused',0)]:
-    p.state = state; p.anim.state = state; p.opacity = 1.0; p.setWindowOpacity(1.0)
-    p.set_level(level)
-    for i in range(90): p.anim.step(i/30, level)
+    p.settle(state, level)
     pm = p.grab()
     name = f"{state}_{int(level*100):02d}.png"
     pm.save(str(out / name))
@@ -54,8 +52,6 @@ print('ok')
 def analyse_snapshots(rec: Recorder) -> None:
     from PIL import Image
 
-    cfg = load_config()
-    w, h = cfg["overlay"]["width"], cfg["overlay"]["height"]
     stats: dict[str, dict[str, Any]] = {}
     for p in sorted(OUT.glob("*.png")):
         im = Image.open(p).convert("RGBA")
@@ -69,10 +65,8 @@ def analyse_snapshots(rec: Recorder) -> None:
     if not stats:
         rec.add("snapshot_stats", False, "high", "no snapshots")
         return
-    any_size = next(iter(stats.values()))["size"]
-    rec.add("pill_size_matches_config", abs(any_size[0] / any_size[1] - w / h) < 0.05, "medium", f"{any_size} vs {w}x{h}")
-    rec.add("pill_corners_transparent", all(s["corner_alpha"] < 30 for s in stats.values()), "medium", "fully rounded ends")
-    rec.add("pill_fill_dark", all(s["dark_px"] > 0.4 * s["size"][0] * s["size"][1] * 0.6 for s in stats.values()), "medium")
+    rec.add("window_corners_transparent", all(s["corner_alpha"] < 30 for s in stats.values()), "medium", "island floats on a clear window")
+    rec.add("island_fill_dark", all(s["dark_px"] > 1500 for s in stats.values()), "medium")
     lo = stats.get("listening_15", {}).get("white_px", 0)
     hi = stats.get("listening_90", {}).get("white_px", 0)
     rec.add("bars_grow_with_mic_level", hi > lo * 1.5, "high", f"white px {lo} -> {hi}")
@@ -110,7 +104,7 @@ def _find_windows(pid: int) -> list[int]:
 
 def live_window_checks(rec: Recorder) -> None:
     """Real overlay process via the real client: styles, focus, idle hiding, resilience."""
-    cfg = load_config(overrides={"overlay": {"hide_delay_ms": 300, "fade_ms": 100}})
+    cfg = load_config(overrides={"overlay": {"hide_delay_ms": 300, "fade_ms": 100, "idle_visible": False}})   # the old hide-when-idle behaviour
     cl = OverlayClient(cfg, restart_cooldown_s=0.2)
     fg_before = user32.GetForegroundWindow()
     if not cl.start() or cl.proc is None:
@@ -122,7 +116,7 @@ def live_window_checks(rec: Recorder) -> None:
     time.sleep(1.5)
     wins = [h for h in _find_windows(pid) if user32.IsWindowVisible(h)]
     pill = next((h for h in wins if user32.GetWindowRect(h, ctypes.byref(wintypes.RECT())) and
-                 (lambda r: (user32.GetWindowRect(h, ctypes.byref(r)), r.right - r.left)[1] <= 200)(wintypes.RECT())), None)
+                 (lambda r: (user32.GetWindowRect(h, ctypes.byref(r)), r.right - r.left)[1] <= 700)(wintypes.RECT())), None)
     rec.add("live:visible_when_listening", pill is not None, "high", f"{len(wins)} visible windows")
     if pill:
         ex = user32.GetWindowLongW(pill, GWL_EXSTYLE) & 0xFFFFFFFF

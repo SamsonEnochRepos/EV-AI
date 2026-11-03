@@ -1,0 +1,28 @@
+# What Evie knows about the user. These used to be written into persona.md; they are seeded into memory (ev/memory/migrations.py)
+# and the user can change any of it by voice ("forget my laptop", "remember that ...") or by editing the vault and confirming.
+#
+# On first start-up every key here is seeded. After that, a key you ADD here is added to your vault the next time EV starts
+# (apply_seed_updates): an existing fact is never overwritten and a fact you forgot is not brought back. To change a fact that
+# is already in your vault, tell Evie or edit EV/Facts.md and say "review my unconfirmed facts".
+#
+# Everything below comes from things the user said about themself (the original persona, and their messages to Claude about
+# their projects, portfolio and preferences). Nothing is guessed. Keep each value under 200 characters: facts go in the prompt.
+[facts]
+name = "Samson, goes by Sam"
+signs_off_as = "Samson, in emails and documents"
+country = "India"
+student = "a college student who takes part in hackathons"
+hackathon_wins = "Smart India Hackathon 2025 national winner, HackIndia Spark 1 winner, HackIndia national finalist and second runner up"
+hackathon_mentions = "special mentions at Google DevFest on Campus and at Cyberthon 2025"
+work = "a software and AI developer who builds projects end to end; recently interned at I G M E Information Technology on a contract lifecycle management platform"
+projects = "EV and Evie, Cell Intel, SecureWipe, WriteRight AI, HydroVision, EZConverter, DocCheck, a portfolio site, wind turbine security, wastewater COD and BOD prediction"
+building = "EV, the local voice assistant Evie is the face of: Python on Windows, runs fully on the laptop, no cloud, no API keys"
+other_projects = "mostly AI, security and web development"
+tools = "Python with conda environments only, never venv; Claude Code, Kaggle and Colab for training, Android Studio, GitHub Pages"
+explain_style = "likes plain-language explanations in short paragraphs, and wants the exact commands to run"
+wants_from_evie = "wants Evie to sound human with short natural replies, plan the day, remind, help with projects, and later take phone calls and warn about problems in live apps"
+assistant_name = "the assistant is called EV and her name is Evie; never spell it Eevee"
+values = "cares a lot about privacy and about making things work well on modest hardware"
+laptop = "Ryzen 5 7535HS, about 7 GB RAM, RTX 3050 with 4 GB VRAM, Windows 10 Home"
+interests = "[FILL IN]"
+not_to_confuse = "Suryaprasanth is a different person; never attribute his work, skills or projects to Sam"

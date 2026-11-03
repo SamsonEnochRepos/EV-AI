@@ -13,6 +13,7 @@ open_app = "safe"             # admin=true (run as administrator) always escalat
 close_app = "safe"            # polite close only; force=true escalates to confirm, protected apps are blocked
 open_website = "safe"         # public https sites only; unfamiliar links that carry a query string escalate to confirm
 take_screenshot = "safe"
+open_file = "safe"            # only files in [files] open_dirs, only the types in open_extensions; the tool re-checks the file it resolves itself
 set_display_mode = "safe"     # toggles the on-screen text card; touches nothing but EV's own overlay
 set_timer = "safe"
 set_reminder = "safe"
@@ -23,7 +24,16 @@ get_weather = "safe"
 read_screen = "safe"
 screenshot_describe = "safe"
 remember_fact = "safe"
-forget_fact = "safe"
+forget_fact = "safe"          # a write to memory the user didn't plainly say (web/screen/note text, or words they never said) is escalated to a spoken yes in code: ev/safety/provenance.py
+recall = "safe"               # read-only search of the vault; results are wrapped as untrusted data
+run_skill = "safe"            # a skill's steps are ordinary tool calls and EACH goes through the gate on its own; a risky step still asks
+save_skill = "safe"           # voice only (not in the model's tool list): turns what was just done into a skill file in skills/
+manage_skill = "safe"         # voice only: add a phrase, rename, list. Deleting a skill is escalated to confirm by policy.py (from the arguments)
+list_reminders = "safe"
+open_dashboard = "safe"        # voice only: opens EV's own loopback page in the browser (a one-time sign-in link; see SECURITY.md)
+snooze_proactive = "safe"     # voice only: makes EV quieter, never louder (it can't widen anything)
+get_agenda = "safe"           # read-only calendar (an .ics file or Outlook); only registered when a calendar is configured; event titles are untrusted data
+keep_fact = "confirm"         # voice only (not in the model's tool list): keep a hand-edited line of Facts.md as a fact. Always a spoken yes
 take_note = "safe"
 focus_window = "safe"
 scroll = "safe"
@@ -68,6 +78,14 @@ trusted_hosts = []
 [files]
 safe_dirs = ["data/notes", "data/sandbox"]
 deny_symlinks = true
+# open_file may open a file only from these folders ({name} is filled in from ev.toml at start-up; an entry whose
+# feature is off is dropped) and only these types. Opening a file can run it, so no .exe/.bat/.lnk/.ps1/.html here.
+open_dirs = ["data/notes", "data/sandbox", "{screenshots}", "{vault_ev}"]
+open_extensions = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "txt", "md", "csv",
+                   "docx", "xlsx", "pptx", "mp3", "wav", "mp4"]
+# Where EV's own code may create files. The vault (ev/memory/vault.py) refuses to write anywhere else, so a bug there can't
+# reach the rest of the user's vault. Everything in the vault outside the EV folder is read-only to EV.
+write_dirs = ["{vault_ev}", "{skills}", "data/notes"]
 
 [shell]
 enabled = false

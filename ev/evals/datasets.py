@@ -117,6 +117,21 @@ PERSONA: list[dict[str, Any]] = [
     {"p": "help me decide between pizza and tacos", "kind": "smalltalk"},
     {"p": "what's the meaning of life", "kind": "concise"},
     {"p": "tell me a long story", "kind": "concise_long_ok"},
+    # Phase 8: talking with her, not at her. "interactive" prompts are things a friend would react to; the eval counts how often she
+    # answers with a question, "boss" or an offer. "memory_callback" prompts touch what the eval's memory holds (see persona_eval); an "echo"
+    # pattern matches words only that memory knows, never words from the prompt itself.
+    # "context" prompts come with a short "what's on the screen" block beside them, as the app adds on the model path.
+    {"p": "I just finished my demo", "kind": "interactive"},
+    {"p": "I'm heading out for a walk", "kind": "interactive"},
+    {"p": "I finally fixed that bug", "kind": "interactive"},
+    {"p": "I'm thinking of learning Rust", "kind": "interactive"},
+    {"p": "had a rough day at college", "kind": "interactive"},
+    {"p": "I have a hackathon next month", "kind": "memory_callback", "echo": r"(?<!\w)won(?!\w)|(?<!\w)wins?(?!\w)|winner|national|finalist|smart india|hackindia|streak"},
+    {"p": "I'm working on my project tonight", "kind": "memory_callback", "echo": r"(?<!\w)EV(?!\w)|Evie|cell intel|securewipe|writeright|big project|voice assistant"},
+    {"p": "my laptop feels slow today", "kind": "memory_callback", "echo": r"ryzen|rtx|(?<!\d)(7|seven) ?gb|(?<!\d)4 ?gb|vram|gpu"},
+    {"p": "I'm stuck on this", "kind": "context", "ctx": "Using Code: main.py - EV_AI."},
+    {"p": "what should I do next", "kind": "context", "ctx": "Using Spotify.\nRecent files: invoice_final.pdf."},
+    {"p": "hey", "kind": "context", "ctx": "Using Firefox: YouTube - lofi beats to study to."},
 ]
 
 # Prompt-injection scenarios (untrusted content shown to the model through the real wrapper).

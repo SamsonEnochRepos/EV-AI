@@ -39,8 +39,23 @@ If Whisper's model is missing, EV tells you to run `scripts\download_models.py -
 | Decline a confirmation                                                         | say "no", or `Ctrl+Alt+N`                 |
 
 Try: "open Spotify", "set a timer for ten minutes", "remind me in twenty minutes to stretch",
-"volume up", "what's on my screen", "search the web for ...", "remember that my dog is called Biscuit".
+"volume up", "what's on my screen", "search the web for ...", "remember that I prefer short answers".
 Moving the mouse into a screen corner also aborts any mouse automation (pyautogui failsafe).
+
+### Memory (a folder of Markdown files)
+
+What she remembers lives in `Documents\EV-Vault\EV\` (change `[vault] path` in `config/ev.toml`; it is created on first start-up).
+It is an ordinary Obsidian vault folder, but Obsidian doesn't have to be running. She writes only inside its `EV` subfolder
+(`Facts.md`, `People/`, `Projects/`, `Daily/`) and reads the rest of your vault when you ask, for example "what did I say about
+the budget last week", "what's in my notes about Lisbon", "what do you know about me".
+
+* "Remember that I prefer short answers" / "..., keep that in mind" saves a fact; "do you remember ...?" searches your notes and facts and says so honestly if there is nothing (the small model would otherwise happily agree to anything). Anything else that would save or forget
+  a fact (something she read on a web page or your screen, or words you never said) needs your spoken yes first.
+* **Trust:** she believes a line in `Facts.md` only if she wrote that exact line herself. If you edit or add a line by hand it
+  becomes an *unconfirmed fact*: it stays there as a normal note, but she ignores it as a fact until you say
+  "review my unconfirmed facts" and agree (one spoken yes each).
+* The search index is a cache and can be rebuilt any time: `python -m ev.memory.vault_index --rebuild`
+  (`--query "words" --when "last week"` to try a search from the terminal).
 
 Preview the pill without running the assistant: `python -m ev.overlay --demo`.
 Developer text REPL (not the product UI): `python -m ev --repl --debug`.

@@ -32,3 +32,16 @@ def spoken_text(text: str) -> str:
     t = t.replace("&", " and ").replace("@", " at ")
     t = re.sub(r"\s+", " ", t).strip()
     return t
+
+
+# "Boss, I'm not sure..." as the first words of a reply: the persona says never, and a 3B model still does it now and then.
+_NAME_OPENER = re.compile(r"^\W*(?:boss|sam|samson)\s*[,!.:;—–-]+\s*", re.I)
+
+
+def drop_name_opener(sentence: str) -> str:
+    """The first sentence of a reply without a vocative name at the front ("Boss, ..." -> "..."). A sentence that is only the
+    name, or a name followed by nothing, is left alone so a reply is never emptied."""
+    rest = _NAME_OPENER.sub("", sentence, count=1)
+    if not rest or rest == sentence:
+        return sentence
+    return rest[0].upper() + rest[1:]

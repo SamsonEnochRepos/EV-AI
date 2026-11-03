@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" data-theme="crimson">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>EV dashboard</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body data-state="idle">
+<div class="shell">
+  <aside class="rail">
+    <div class="brand">
+      <span class="eyes" id="eyes" aria-hidden="true"><i></i><i></i></span>
+      <b>EV</b>
+      <span class="online" id="online">ONLINE</span>
+    </div>
+    <nav id="tabs" aria-label="Sections">
+      <button data-tab="live" class="on">Live</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="voice">Voice &amp; model</button>
+      <button data-tab="skills">Skills</button>
+      <button data-tab="memory">Memory</button>
+      <button data-tab="policy">Policy</button>
+    </nav>
+    <div class="rail-status">
+      <div class="label">Status</div>
+      <div class="status-line"><span id="state" class="state">…</span></div>
+      <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="themes" role="group" aria-label="Colour theme">
+      <div class="label">Theme</div>
+      <button class="swatch crimson" data-theme-set="crimson" title="Crimson" aria-label="Crimson theme"></button>
+      <button class="swatch arc" data-theme-set="arc" title="Arc blue" aria-label="Arc blue theme"></button>
+      <button class="swatch nebula" data-theme-set="nebula" title="Nebula" aria-label="Nebula theme"></button>
+    </div>
+  </aside>
+  <div class="stage">
+    <header class="top">
+      <h1 id="page-title">Live</h1>
+      <span id="model" class="muted"></span>
+      <span class="spacer"></span>
+      <button data-control="pause" id="b-pause">Pause</button>
+      <button data-control="mute" id="b-mute">Mute</button>
+      <button data-control="kill" class="danger">Stop everything</button>
+    </header>
+    <div id="notice" role="status"></div>
+    <main>
+      <section id="tab-live"></section>
+      <section id="tab-settings" hidden></section>
+      <section id="tab-voice" hidden></section>
+      <section id="tab-skills" hidden></section>
+      <section id="tab-memory" hidden></section>
+      <section id="tab-policy" hidden></section>
+    </main>
+  </div>
+</div>
+<script src="/orb.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

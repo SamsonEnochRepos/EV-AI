@@ -51,6 +51,16 @@ class Speaker:
             for _ in self.engine.synthesize("Hi there."):
                 pass
 
+    def swap_engine(self, new: TTSEngine) -> None:
+        """Change the voice without restarting EV. The new engine is loaded and made to say a short phrase *first*, outside the
+        lock, so anything wrong with it (a missing file, a bad voice name) raises here and the voice that was speaking is left
+        exactly as it was. Only then, between two sentences, is it swapped in."""
+        new.load()
+        for _ in new.synthesize("Hi."):
+            pass
+        with self._synth_lock:
+            self.engine = new
+
     def stop(self) -> None:
         with self._lock:
             self._gen += 1

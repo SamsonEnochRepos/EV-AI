@@ -16,16 +16,26 @@ from ev.audio.interrupt import InterruptMonitor
 from ev.audio.playback import Player
 from ev.audio.trigger import Hotkeys, WakeWord
 from ev.audio.vad import make_vad
+from ev.context.calendar import make_calendar
+from ev.context.snapshot import ContextSnapshot
 from ev.core.config import Config
 from ev.core.events import EventBus, State
 from ev.core.log import get_logger, setup_logging
 from ev.core.state import StateMachine
+from ev.dashboard.hub import Hub
+from ev.dashboard.server import DashboardServer
 from ev.llm.brain import Brain
 from ev.llm.client import LLMError, OllamaClient, OllamaDown
+from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.overlay.client import OverlayClient
+from ev.proactive.engine import Actions, ProactiveEngine
+from ev.proactive.probes import Probes
+from ev.proactive.rules import apply_overrides, load_rules
 from ev.safety.gate import SafetyGate, parse_yes_no
 from ev.safety.policy import Policy
+from ev.safety.provenance import TurnState
+from ev.skills.store import SkillStore
 from ev.stt.whisper import STT
 from ev.tools.base import ToolRegistry
 from ev.tools.builtin import ToolContext, build_tools
@@ -48,22 +58,38 @@ class EVApp:
         self.bus = EventBus()
         self.sm = StateMachine(self.bus)
         self.memory = MemoryStore(cfg.data_path(cfg["memory"]["db_file"]))
-        self.policy = Policy.load(cfg.path("general", "policy_file"))
+        seed_from_persona(self.memory, cfg.path("memory", "seed_file"))
+        self.policy = Policy.load(cfg.path("general", "policy_file"), places=cfg.places())
         self.gate = SafetyGate(self.policy, ask=self.confirm)
         self.overlay = OverlayClient(cfg)
         self.client = OllamaClient(cfg)
         self.scheduler = Scheduler(self.memory, self._on_alert)
-        self.registry: ToolRegistry = build_tools(ToolContext(cfg, self.memory, self.scheduler, self.policy))
+        self.turn = TurnState()
+        self.vault, self.index = open_vault(cfg, self.memory, self.policy)
+        ctx_cfg = cfg.raw.get("context", {})
+        self.calendar = make_calendar(str(ctx_cfg.get("calendar_source", "none")) if ctx_cfg.get("calendar", True) else "none",
+                                      str(ctx_cfg.get("calendar_file", "")), float(ctx_cfg.get("calendar_refresh_s", 300)))
+        self.context = ContextSnapshot(cfg, self.policy, self.calendar)
+        self.skills = SkillStore(cfg.skills_dir(), self.policy)
+        for problem in self.skills.load():
+            log.warning("skill skipped: %s", problem)
+        self.registry: ToolRegistry = build_tools(ToolContext(cfg, self.memory, self.scheduler, self.policy,
+                                                              vault=self.vault, index=self.index, turn=self.turn,
+                                                              calendar=self.calendar))
         # display mode: the pill shows a text card with what the user said and what EV answers
         self.display_mode = self.memory.get_kv("display_mode", "1" if cfg["overlay"].get("display_mode") else "0") == "1"
         self._last_heard = ""
         self.overlay.send_display(self.display_mode)
         self._register_display_tool()
         self._register_screen_tools()
-        self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting)
+        self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting,
+                           vault=self.vault, index=self.index, turn=self.turn, context=self.context, skills=self.skills)
+        self.brain.on_facts_changed = self.brain.refresh_prompt_cache      # a fact changed: re-prime the prompt cache once
+        self.brain.on_tools_changed = self.brain.refresh_prompt_cache      # the skill list changed, so the tool schema did
+        self.proactive = self._build_proactive()
         self.stt = STT(cfg)
         self.vad = make_vad("silero", cfg["audio"]["vad_aggressiveness_threshold"])
-        self.recorder = Recorder(cfg, self.vad, on_level=self.overlay.send_level)
+        self.recorder = Recorder(cfg, self.vad, on_level=self._on_level)
         self.speaker: Speaker | None = None
         self.muted = False
         self.paused = False
@@ -76,6 +102,7 @@ class EVApp:
         self._carry: list[np.ndarray] = []                # mic blocks captured while interrupting, fed to the next recording
         self._mic: SharedMic | None = None                # one stream for the whole conversation (conversation.continuous_mic)
         self._out_level = 0.0
+        self._level_pub_at = 0.0
         self.hotkeys = Hotkeys(cfg, {
             "push_to_talk": self.on_trigger, "kill_switch": self.kill,
             "confirm_yes": lambda: self._answers.put(True), "confirm_no": lambda: self._answers.put(False),
@@ -83,6 +110,13 @@ class EVApp:
         self.wake = WakeWord(cfg, self.on_trigger) if cfg["trigger"]["mode"] == "wakeword" else None
         self.tray: Any = None
         self.bus.subscribe("state", self._on_state)
+        # the dashboard: a window onto the same events the pill gets, plus a server that only runs if [dashboard] enabled
+        self.hub = Hub()
+        self.bus.subscribe("state", lambda old, new: self.hub.publish("state", old=old.value, new=new.value))
+        self.bus.subscribe("proactive", lambda **e: self.hub.publish("proactive", **{("what" if k == "kind" else k): v for k, v in e.items()}))
+        self.brain.on_tool_result = lambda e: self.hub.publish("tool", **e)
+        self.dashboard: DashboardServer | None = None
+        self._register_dashboard_tool()
 
     # ---- optional tools (screen/control) registered lazily so lightweight setups still start
     def _register_screen_tools(self) -> None:
@@ -90,7 +124,8 @@ class EVApp:
             from ev.control.tools import register_control_tools
             from ev.screen.tools import register_screen_tools
 
-            register_screen_tools(self.registry, self.cfg, self.policy, self.client)
+            register_screen_tools(self.registry, self.cfg, self.policy, self.client,
+                                  on_artifact=self.memory.set_last_artifact)
             register_control_tools(self.registry, self.cfg, self.policy, self.gate)
             self._register_agent_tool()
         except Exception:
@@ -112,6 +147,74 @@ class EVApp:
         self.registry.register(Tool(
             "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
             {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True))
+
+    # ---- dashboard: a loopback page, opened on request with a one-time sign-in link
+    def _register_dashboard_tool(self) -> None:
+        from ev.tools.base import Tool, ToolResult
+
+        def open_dashboard() -> ToolResult:
+            if not self.open_dashboard():
+                return ToolResult(False, "The dashboard is turned off.")
+            return ToolResult(True, "Opening the dashboard.")
+
+        self.registry.register(Tool("open_dashboard", "Open the dashboard in the browser.", {}, open_dashboard, (),
+                                    direct=True, llm_visible=False))
+
+    def _start_dashboard(self) -> None:
+        dc = self.cfg.raw.get("dashboard", {})
+        if not dc.get("enabled", False) or self.dashboard is not None:
+            return
+        from ev.dashboard.backend import AppBackend
+
+        try:
+            server = DashboardServer(AppBackend(self), self.hub, port=int(dc.get("port", 0)))
+            server.start()
+        except OSError as e:
+            log.error("dashboard could not start: %s", e)
+            return
+        self.dashboard = server
+
+    def open_dashboard(self) -> bool:
+        """Open the dashboard in the default browser through a one-time link. False if it is off."""
+        if self.dashboard is None:
+            return False
+        import webbrowser
+
+        webbrowser.open(self.dashboard.login_url())
+        return True
+
+    # ---- proactive: EV speaking up on its own, within the guards in config/proactive.toml
+    def _build_proactive(self) -> ProactiveEngine | None:
+        from ev.tools.base import Tool, ToolResult
+
+        pc = self.cfg.raw.get("proactive", {})
+        if not pc.get("enabled", True):
+            return None
+        rules, guards, problems = load_rules(self.cfg.root / str(pc.get("rules_file", "config/proactive.toml")))
+        guards, tuned = apply_overrides(guards, pc)
+        problems += tuned
+        engine = ProactiveEngine(
+            rules, guards, Probes(), Actions(say=self.say_direct, notice=self.overlay.send_notice, skill=self.brain.run_skill_proactive),
+            memory=self.memory, calendar=self.calendar, bus=self.bus, state_ok=self._may_speak_up)
+        engine.problems = problems
+
+        def snooze_proactive(minutes: float) -> ToolResult:
+            engine.snooze(minutes)
+            if minutes <= 0:
+                return ToolResult(True, "Okay, I'll speak up again if something comes up.")
+            m = int(round(minutes))
+            span = f"{m // 60} hour{'s' if m // 60 != 1 else ''}" if m % 60 == 0 and m >= 60 else f"{m} minute{'s' if m != 1 else ''}"
+            return ToolResult(True, f"Okay, I'll stay quiet for {span}.")
+
+        self.registry.register(Tool("snooze_proactive", "Stop speaking up on my own for a while (0 minutes ends it).",
+                                    {"minutes": {"type": "number", "minimum": 0, "maximum": 720}}, snooze_proactive, ("minutes",),
+                                    direct=True, llm_visible=False))
+        return engine
+
+    def _may_speak_up(self) -> bool:
+        """EV only volunteers something when it is completely idle: no turn, no follow-up window, no confirmation, not muted."""
+        return (self.sm.state is State.IDLE and not (self.muted or self.paused or self._confirming or self._following_up)
+                and not self._turn_lock.locked())
 
     def _show(self, who: str, text: str, append: bool = False) -> None:
         """Put a line of the conversation on the pill's text card (only does anything in display mode)."""
@@ -143,7 +246,16 @@ class EVApp:
         self.overlay.start()
         self._init_speaker()
         self._select_model()
+        if self.index:
+            self.index.start()                                  # indexes the vault now, then every vault.poll_s
+        if self.calendar:
+            self.calendar.start()                               # refreshed in the background; never read on the request path
+        if self.proactive:
+            self.proactive.start()
+        if self.vault and (n := len(self.vault.unconfirmed_facts())):
+            log.warning("%d unconfirmed fact(s) in the vault; say \"review my unconfirmed facts\" to go through them", n)
         self.scheduler.start()
+        self._start_dashboard()
         self.hotkeys.start()
         if self.wake:
             self.wake.start()
@@ -232,11 +344,19 @@ class EVApp:
         if self.wake:
             self.wake.stop()
         self.scheduler.stop()
+        if self.dashboard:
+            self.dashboard.stop()
         self.overlay.stop()
         if self.speaker:
             self.speaker.close()
         if self.tray:
             self.tray.stop()
+        if self.index:
+            self.index.close()
+        if self.calendar:
+            self.calendar.stop()
+        if self.proactive:
+            self.proactive.stop()
         self.memory.close()
 
     # ---- event hooks
@@ -246,14 +366,24 @@ class EVApp:
             (self.wake.resume if new is State.IDLE else self.wake.pause)()
 
     def _on_acting(self, active: bool) -> None:
+        if self.sm.state is State.IDLE:
+            return          # a skill started by a rule or the dashboard: no turn is running, so don't fake one (IDLE -> THINKING would stick)
         if active:
             self.sm.to(State.ACTING)
         else:
             self.sm.to(State.THINKING)
 
+    def _on_level(self, level: float) -> None:
+        """Mic or speaker level: to the island, and (throttled, only while a dashboard is open) to the dashboard's orb."""
+        self.overlay.send_level(level)
+        now = time.monotonic()
+        if now - self._level_pub_at >= 1 / 15 and self.hub.watchers:
+            self._level_pub_at = now
+            self.hub.publish("level", v=round(float(level), 2))
+
     def _on_out_level(self, level: float) -> None:
         self._out_level = level
-        self.overlay.send_level(level)
+        self._on_level(level)
 
     def _on_alert(self, text: str) -> None:
         if self.muted or self.paused:
@@ -351,6 +481,7 @@ class EVApp:
                 x = 16 + i * 8
                 d.rounded_rectangle((x, 32 - h // 2, x + 3, 32 + h // 2), radius=1, fill="white")
             menu = pystray.Menu(
+                pystray.MenuItem("Dashboard", lambda *_: self.open_dashboard(), enabled=lambda _i: self.dashboard is not None),
                 pystray.MenuItem("Pause", lambda *_: self.toggle_pause(), checked=lambda _i: self.paused),
                 pystray.MenuItem("Mute mic", lambda *_: self.toggle_mute(), checked=lambda _i: self.muted),
                 pystray.MenuItem("Quit", lambda *_: setattr(self, "_quit", True)),
@@ -502,6 +633,7 @@ class EVApp:
                 self.say_direct("I can't reach my brain right now.")
                 return None
             log.info("reply%s: %s", " (interrupted)" if self._interrupted.is_set() else "", res.text)
+            self.hub.publish("turn", user=text, reply=res.text, interrupted=self._interrupted.is_set())
             if self.speaker and not self._interrupted.is_set():
                 self.speaker.wait_done(120)               # the monitor keeps listening meanwhile and can cut this short
         finally:

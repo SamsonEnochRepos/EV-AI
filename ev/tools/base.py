@@ -30,8 +30,12 @@ class Tool:
     required: tuple[str, ...] = ()
     timeout_s: float = 10.0
     direct: bool = False        # the result message is already a finished spoken sentence: say it, skip the model's re-phrasing
+    llm_visible: bool = True    # False: voice / dashboard only. Not in the model's tool list, and a model-made call to it is refused
 
     def schema(self) -> dict[str, Any]:
+        # maxLength is for validate_args only. Sent to the model it is about 6 tokens per argument on every request, and a 3B
+        # model doesn't count characters anyway; the limit is still enforced when the call comes back.
+        props = {k: {a: b for a, b in v.items() if a != "maxLength"} for k, v in self.parameters.items()}
         return {
             "type": "function",
             "function": {
@@ -39,7 +43,7 @@ class Tool:
                 "description": self.description,
                 "parameters": {
                     "type": "object",
-                    "properties": self.parameters,
+                    "properties": props,
                     "required": list(self.required),
                 },
             },
@@ -94,6 +98,10 @@ class ToolRegistry:
         self._tools[tool.name] = tool
         self._schemas = None
 
+    def unregister(self, name: str) -> None:
+        if self._tools.pop(name, None) is not None:
+            self._schemas = None
+
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
@@ -101,10 +109,11 @@ class ToolRegistry:
         return list(self._tools)
 
     def schemas(self, only: list[str] | None = None) -> list[dict[str, Any]]:
+        """What the model is shown. Tools that are not llm_visible are never listed, even if named in `only`."""
         if only is not None:
-            return [t.schema() for n, t in self._tools.items() if n in only]
+            return [t.schema() for n, t in self._tools.items() if n in only and t.llm_visible]
         if self._schemas is None:
-            self._schemas = [t.schema() for t in self._tools.values()]
+            self._schemas = [t.schema() for t in self._tools.values() if t.llm_visible]
         return self._schemas
 
     def run(self, tool: Tool, args: dict[str, Any]) -> ToolResult:

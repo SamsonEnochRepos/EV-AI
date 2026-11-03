@@ -140,6 +140,15 @@ class OverlayClient:
             text = text[: protocol.MAX_TEXT - 1].rstrip() + "…"
         self._send({"t": "text", "who": who, "v": text, "append": append})
 
+    def send_notice(self, text: str) -> None:
+        """A short card for a few seconds, shown even when display mode is off. Used for EV's own proactive notices."""
+        text = " ".join(text.split())
+        if not text or self.sock is None:
+            return
+        if len(text) > protocol.MAX_TEXT:
+            text = text[: protocol.MAX_TEXT - 1].rstrip() + "…"
+        self._send({"t": "notice", "v": text})
+
     def send_level(self, level: float) -> None:
         now = time.monotonic()
         if now - self._last_level_sent < 1 / 40:   # throttle to ~40 Hz

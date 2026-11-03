@@ -1,0 +1,17 @@
+# Work mode: open the editor and put some music on. Say "work mode", or "work mode with jazz" to pick the music.
+# Each step is an ordinary tool call and goes through the safety gate on its own, exactly as if you had asked for it.
+name = "work mode"
+description = "Open the coding setup and start some music"
+triggers = ["work mode", "let's get to work", "time to work", "work mode with {music}"]
+say = "Okay, let's get to work."
+
+[params]
+music = "lofi beats"
+
+[[steps]]
+tool = "open_app"
+args = { name = "visual studio code" }
+
+[[steps]]
+tool = "open_website"
+args = { site = "youtube", query = "{music}" }

@@ -1,0 +1,57 @@
+# Things EV may bring up on its own. Every rule is a source (what to watch), optional conditions, and an action: say a line,
+# show a short card (overlay), and/or run a skill. Lines are built from your template and a few sanitised fields, never from
+# model text. A skill run this way goes through the safety gate step by step, and a step that would need your spoken yes is
+# refused instead of asked: EV does not start a question on its own. Say "quiet for an hour" to snooze the spoken lines.
+#
+# Sources and the {fields} each one provides:
+#   time          at = "09:00", days = [...], window_min = 30                {time}
+#   calendar      minutes_before = 10 (needs context.calendar_source)         {title} {minutes}
+#   process_exit  names = ["cargo", ...], min_runtime_s = 120                 {name} {minutes}
+#   file          glob = "~/Downloads/*.pdf" (a file that has stopped growing) {name}
+#   battery       below = 20 (re-arms when plugged in or 5 points higher)     {percent}
+#   app_time      exe = "code" (or "" for any app), minutes = 90              {app} {minutes}
+#   event         topic = "job_done" (another part of EV announces it)        {summary} {count} {label} {branch}
+# Optional on any rule: enabled = false, active_within_s = 600 (only if you touched the keyboard or mouse this recently),
+# cooldown_s = 3600.
+
+[guards]
+quiet_hours = ["22:30", "07:30"]     # no spoken lines in this window (cards are still shown); [] for none
+max_spoken_per_hour = 4              # EV never speaks up more than this many times an hour
+max_idle_s = 1800                    # nobody at the keyboard or mouse for this long: don't talk to an empty room
+defer_minutes = 10                   # a line held back by a guard is dropped after this long, not delivered stale
+check_fullscreen = true              # never during a full-screen app, game or presentation
+check_calls = true                   # never while another program is using the microphone, or a call app is in front
+call_apps = ["zoom", "teams", "ms-teams", "webex", "skype", "slack", "discord", "meet"]
+tick_s = 2
+process_poll_s = 10                  # how often the process and file sources look (they cost a little more)
+
+[[rules]]
+name = "low battery"
+source = "battery"
+below = 20
+say = "Your battery is at {percent} percent and it isn't charging."
+overlay = "Battery {percent}%"
+
+[[rules]]
+name = "long build finished"
+source = "process_exit"
+names = ["cargo", "msbuild", "gradle", "cmake", "ninja", "dotnet", "javac", "tsc", "webpack"]
+min_runtime_s = 120
+say = "Your {name} job just finished, after about {minutes} minutes."
+
+[[rules]]
+name = "morning brief"
+source = "time"
+at = "09:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+window_min = 60                      # until ten; if you aren't at the computer in that hour, it is skipped for the day
+active_within_s = 600
+skill = "morning brief"
+
+[[rules]]
+name = "meeting soon"
+enabled = false                      # switch on after setting context.calendar_source in ev.toml
+source = "calendar"
+minutes_before = 10
+say = "Heads up, {title} starts in {minutes} minutes."
+overlay = "{title} in {minutes} min"

@@ -7,22 +7,28 @@ from ev.core.config import Config
 from ev.core.log import setup_logging
 from ev.llm.brain import Brain
 from ev.llm.client import OllamaClient
+from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.safety.gate import SafetyGate, parse_yes_no
 from ev.safety.policy import Policy
+from ev.safety.provenance import TurnState
 from ev.tools.builtin import ToolContext, build_tools
 from ev.tools.scheduler import Scheduler
 
 
 def build_brain(cfg: Config, memory: MemoryStore, ask=None, model: str | None = None) -> tuple[Brain, Scheduler]:  # noqa: ANN001
-    policy = Policy.load(cfg.path("general", "policy_file"))
+    policy = Policy.load(cfg.path("general", "policy_file"), places=cfg.places())
     gate = SafetyGate(policy, ask=ask)
     sched = Scheduler(memory, lambda m: print(f"\n[alert] {m}"))
-    registry = build_tools(ToolContext(cfg, memory, sched, policy))
+    turn = TurnState()
+    vault, index = open_vault(cfg, memory, policy)
+    if index:
+        index.refresh()                      # the REPL doesn't run the background poller
+    registry = build_tools(ToolContext(cfg, memory, sched, policy, vault=vault, index=index, turn=turn))
     client = OllamaClient(cfg)
     if model:
         client.model = model
-    return Brain(cfg, client, memory, registry, gate, now=dt.datetime.now), sched
+    return Brain(cfg, client, memory, registry, gate, now=dt.datetime.now, vault=vault, index=index, turn=turn), sched
 
 
 def run_repl(cfg: Config, debug: bool = False) -> int:
@@ -32,6 +38,7 @@ def run_repl(cfg: Config, debug: bool = False) -> int:
         return parse_yes_no(input(f"[confirm] {readback}? (yes/no) "))
 
     memory = MemoryStore(cfg.data_path(cfg["memory"]["db_file"]))
+    seed_from_persona(memory, cfg.path("memory", "seed_file"))
     brain, sched = build_brain(cfg, memory, ask)
     sched.start()
     print("EV dev REPL. Ctrl+C or 'quit' to exit.")

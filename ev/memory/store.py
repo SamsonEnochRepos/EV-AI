@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS reminders (
     fired INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- What EV itself wrote into the vault's fact files. A vault line is only trusted if its exact text hashes to a row here.
+CREATE TABLE IF NOT EXISTS fact_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, file TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+    source TEXT NOT NULL, ts REAL NOT NULL, line_sha256 TEXT NOT NULL, UNIQUE(file, key)
+);
+CREATE INDEX IF NOT EXISTS fact_records_sha ON fact_records(line_sha256);
 """
 
 
@@ -27,11 +33,17 @@ def _norm(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
 
+norm_key = _norm
+
+
 _STOP = {"s", "my", "the", "a", "an", "of", "user", "users"}
 
 
 def _tokens(key: str) -> set[str]:
     return {t for t in _norm(key).split("_") if t and t not in _STOP}
+
+
+key_tokens = _tokens
 
 
 class MemoryStore:
@@ -98,6 +110,32 @@ class MemoryStore:
         rows = self._read("SELECT key,value FROM facts ORDER BY updated DESC LIMIT ?", (limit,))
         return dict(rows)
 
+    # records of the fact lines EV wrote into the vault (see ev/memory/vault.py)
+    def upsert_fact_record(self, file: str, key: str, value: str, source: str, line_sha256: str,
+                           ts: float | None = None) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.db.execute(
+                "INSERT INTO fact_records(file,key,value,source,ts,line_sha256) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(file,key) DO UPDATE SET value=excluded.value, source=excluded.source, "
+                "ts=excluded.ts, line_sha256=excluded.line_sha256",
+                (file, key, value, source, ts if ts is not None else time.time(), line_sha256))
+            self.db.commit()
+
+    def fact_records(self, file: str) -> list[tuple[str, str, str, float, str]]:
+        """(key, value, source, ts, line_sha256) for one vault file, newest first."""
+        return self._read("SELECT key,value,source,ts,line_sha256 FROM fact_records WHERE file=? ORDER BY ts DESC, key",
+                          (file,))
+
+    def delete_fact_record(self, file: str, key: str) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            cur = self.db.execute("DELETE FROM fact_records WHERE file=? AND key=?", (file, key))
+            self.db.commit()
+            return cur.rowcount > 0
+
     # notes
     def add_note(self, text: str) -> int:
         with self._lock:
@@ -146,6 +184,14 @@ class MemoryStore:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value)
             )
             self.db.commit()
+
+    # the last file EV created (screenshot, note...), so "open it" has something to open
+    def set_last_artifact(self, path: Path | str, kind: str) -> None:
+        self.set_kv("last_artifact", str(path))
+        self.set_kv("last_artifact_kind", kind)
+
+    def last_artifact(self) -> tuple[str, str]:
+        return self.get_kv("last_artifact"), self.get_kv("last_artifact_kind")
 
     def snapshot(self) -> dict[str, Any]:
         return {"facts": self.facts(), "summary": self.get_kv("summary")}

@@ -1,0 +1,1 @@
+Give a short spoken morning brief in at most three sentences. Start with good morning and the time. Then the weather in a few words, if it is there. Then what is first on the calendar, if anything, and how many reminders are pending. Leave out anything that is missing and never guess. Plain words, no lists.

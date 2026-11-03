@@ -411,3 +411,54 @@ def test_search_results_are_cached(cfg, memory, policy, monkeypatch):
     tool = reg.get("web_search")
     assert tool.func(query="Capital of Australia").ok and tool.func(query="capital of australia ").ok
     assert len(calls) == 1
+
+
+# ---- lookup planner: a question that needs the web is searched even if the chat model would not call the tool
+def _planner_brain(cfg, memory, policy, registry, replies, seen):
+    from ev.tools.base import Tool, ToolResult
+
+    registry.register(Tool("web_search", "s", {"query": {"type": "string"}},
+                           lambda query: seen.append(query) or ToolResult(
+                               True, "- 2026-11-02 Cyclone Murasu: named by IMD", untrusted=True, source="web_search"),
+                           ("query",)))
+    fake = FakeOllama(replies)
+    brain = Brain(cfg, OllamaClient(cfg, transport=fake.transport()), memory, registry, SafetyGate(policy), persona="You are EV.")
+    return brain, fake
+
+
+def test_planner_turns_a_follow_up_into_a_standalone_search(planner_on, cfg, memory, policy, registry):
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry,
+                                 [text_reply("latest cyclone Chennai name"), text_reply("It's Cyclone Murasu.")], seen)
+    brain.history = [{"role": "user", "content": "I heard a cyclone is coming to Chennai"},
+                     {"role": "assistant", "content": "It's a big storm."}]
+    res = brain.respond("I asked what was the cyclone's name?")
+    assert seen == ["latest cyclone Chennai name"] and res.text == "It's Cyclone Murasu."
+    planner = fake.requests[0]
+    assert "tools" not in planner and "cyclone is coming to Chennai" in planner["messages"][1]["content"]
+    tool_msg = [m for m in fake.requests[1]["messages"] if m["role"] == "tool"][0]["content"]
+    assert "Murasu" in tool_msg
+
+
+def test_planner_none_leaves_the_normal_path(planner_on, cfg, memory, policy, registry):
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("NONE"), text_reply("Because it is.")], seen)
+    res = brain.respond("why do you think the sky looks blue?")
+    assert not seen and res.text == "Because it is." and len(fake.requests) == 2
+
+
+def test_planner_skips_statements_and_can_be_turned_off(planner_on, cfg, memory, policy, registry):
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("Sure.")], seen)
+    brain.respond("I like the rain a lot")                       # not question-shaped: no planner call
+    assert len(fake.requests) == 1
+    brain.lookup_planner = False
+    brain.respond("who won the match last night?")
+    assert len(fake.requests) == 2 and not seen
+
+
+def test_planner_failure_falls_back(planner_on, cfg, memory, policy, registry):
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("Sure.")], seen)
+    brain.client.chat = lambda *a, **k: (_ for _ in ()).throw(LLMError("boom"))     # type: ignore[method-assign]
+    assert brain._plan_lookup("who won the match last night?") is None

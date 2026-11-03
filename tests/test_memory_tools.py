@@ -117,6 +117,25 @@ def test_web_search_pins_duckduckgo_backend(registry, monkeypatch):
     assert r.ok and r.untrusted and seen["backend"] == "duckduckgo"
 
 
+def test_recent_web_search_asks_for_the_past_week_and_shows_dates(registry, monkeypatch):
+    seen = []
+
+    class FakeDDGS:
+        def __init__(self, **kw): ...
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def text(self, query, **kw):
+            seen.append(kw.get("timelimit"))
+            return [{"title": "Cyclone Murasu", "body": "named by IMD", "date": "2026-11-02T11:00:00+00:00"}]
+
+    monkeypatch.setattr("ddgs.DDGS", FakeDDGS)
+    r = run(registry, "web_search", query="latest cyclone Chennai name")
+    assert r.ok and seen == ["w"] and "- 2026-11-02 Cyclone Murasu: named by IMD" in r.message
+    seen.clear()
+    run(registry, "web_search", query="height of everest")
+    assert seen == [None]
+
+
 def test_whisper_loads_offline_only(cfg, monkeypatch):
     import sys
     import types

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
 from pathlib import Path
 
 from ev.core.config import Config
@@ -13,7 +14,8 @@ from . import capture, uia
 from .ocr import OCR
 
 
-def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client: OllamaClient) -> None:
+def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client: OllamaClient,
+                          on_artifact: Callable[[Path, str], None] | None = None) -> None:
     ocr = OCR(cfg)
 
     def read_screen(method: str = "auto") -> ToolResult:
@@ -48,10 +50,12 @@ def register_screen_tools(reg: ToolRegistry, cfg: Config, policy: Policy, client
         win = uia.foreground_window()
         if win is not None and policy.check_sensitive_target(uia.window_title(win)).verdict.value == "block":
             return ToolResult(False, "That window looks sensitive, so I won't screenshot it.")
-        folder = Path(cfg["screen"].get("screenshot_dir") or Path.home() / "Pictures" / "EV Screenshots")
+        folder = cfg.screenshot_dir()
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"EV {dt.datetime.now():%Y-%m-%d %H-%M-%S}.png"
         capture.grab(cfg, full=True).save(path)
+        if on_artifact:
+            on_artifact(path, "screenshot")        # so "open it" / "open the screenshot you just took" can find it
         return ToolResult(True, "Took a screenshot and saved it.", {"path": str(path)})
 
     reg.register(Tool("take_screenshot", "Take a screenshot of the screen and save it as an image file for the user.",

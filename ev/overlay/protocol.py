@@ -64,6 +64,9 @@ def valid_message(m: dict[str, Any]) -> bool:
                 and isinstance(m.get("append", False), bool))
     if t == "display":
         return isinstance(m.get("v"), bool)
+    if t == "notice":
+        v = m.get("v")
+        return isinstance(v, str) and 0 < len(v) <= MAX_TEXT
     if t == "quit":
         return True
     return False

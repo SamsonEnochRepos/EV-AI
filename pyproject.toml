@@ -26,6 +26,7 @@ dependencies = [
 overlay = ["PySide6-Essentials>=6.7"]
 wakeword = ["openwakeword>=0.6"]
 kokoro = ["kokoro-onnx>=0.3"]
+vault = ["pyyaml>=6"]            # front matter dates in vault notes; without it the index falls back to a plain "date:" line
 dev = [
     "pytest>=8",
     "pytest-timeout>=2.3",

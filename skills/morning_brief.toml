@@ -1,0 +1,23 @@
+# Morning brief: the time, the weather, today's calendar and the reminders still pending, said as a few short sentences.
+# The weather uses your home city (tell Evie "remember that my city is ..."); the calendar needs context.calendar_source in
+# ev.toml. A step marked optional is skipped when it can't be done; a step the safety gate refuses always stops the skill.
+name = "morning brief"
+description = "The time, the weather, today's calendar and pending reminders"
+triggers = ["morning brief", "give me my morning brief", "brief me", "start my day"]
+instructions = "morning_brief.md"
+
+[[steps]]
+tool = "get_time_date"
+
+[[steps]]
+tool = "get_weather"
+optional = true
+args = { day = "today" }
+
+[[steps]]
+tool = "get_agenda"
+optional = true
+args = { day = "today" }
+
+[[steps]]
+tool = "list_reminders"

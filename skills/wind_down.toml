@@ -1,0 +1,17 @@
+# Wind down: stop the music, turn the volume down and start a half-hour timer.
+name = "wind down"
+description = "Stop the media, lower the volume and start a half-hour timer"
+triggers = ["wind down", "time to wind down", "start winding down", "goodnight routine"]
+say = "Okay, winding down. Sleep well when you get there."
+
+[[steps]]
+tool = "media_control"
+args = { action = "stop" }
+
+[[steps]]
+tool = "set_volume"
+args = { level = 30 }
+
+[[steps]]
+tool = "set_timer"
+args = { minutes = 30, label = "wind down" }

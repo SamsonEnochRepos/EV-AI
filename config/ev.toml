@@ -71,7 +71,7 @@ host = "127.0.0.1"
 port = 11434
 model = "qwen2.5:3b"
 fallback_model = "llama3.2:latest"
-num_ctx = 4096                 # persona + 20 tool schemas already need ~2k tokens; 2048 truncated the prompt
+num_ctx = 6144                 # persona + 27 tool schemas + facts need ~3k tokens; 2048 truncated the prompt. Measured on qwen2.5:3b (D24): 4096, 6144 and 8192 all sit 100% on the GPU (2.2-2.3 GB) at ~60 tok/s with the same load time
 temperature = 0.6
 num_predict = 110              # replies are spoken, so they are short; the sentence cap below is the real limit
 reply_max_sentences = 2        # hard cap per turn unless the user asks for detail
@@ -82,7 +82,9 @@ filler_after_s = 1.3           # a slow tool (search, weather, screen read) gets
 filler_tools = ["web_search", "get_weather", "read_screen", "screenshot_describe"]
 rewarm_after_s = 90            # if the model has been idle this long (or was unloaded for a screen read), reload it while you speak
 request_timeout_s = 60
+vram_budget_gb = 3.2           # the dashboard warns when a chat model larger than this is picked (this GPU has 4 GB, shared with the speech and voice models)
 history_turns = 6
+lookup_planner = true          # before the main call, one tiny tool-less call decides whether a question needs the web and writes the query (a 3B model won't reliably call web_search by itself). Only runs on question-shaped turns; false = leave it to the model
 think = false
 
 [vlm]
@@ -97,33 +99,102 @@ agent_max_steps = 8
 screenshot_dir = ""             # where "take a screenshot" saves PNGs; "" = Pictures\EV Screenshots
 
 [overlay]
+# The island: a small black pill at the top of the screen with two eyes that follow your mouse pointer. It opens while EV
+# listens or talks, half-opens while it thinks, and in display mode grows downward to show the conversation as text.
 enabled = true
 toolkit = "qt"                 # "qt" | "tk"
 anchor = "top-center"          # top-center|top-left|top-right|bottom-center|...
 offset_x = 0
-offset_y = 12
+offset_y = 6
 monitor = 0
-width = 90
-height = 32
+width = 116                    # the island at rest
+height = 34
+wide_width = 236               # fully open (listening / speaking)
+wide_height = 42
+idle_visible = true            # false = the island appears only while EV is busy and fades away after
+follow_cursor = true           # the eyes follow the mouse pointer
+eye_color = "#ffffff"
+accent = "#ff2d3f"             # the ring and eye colour while EV is working on your screen, or when something goes wrong
 bar_count = 11
 fps = 30
 fade_ms = 180
-display_mode = false           # start with the text card on; "EV, activate display mode" / "deactivate display mode" toggles it
-display_width = 460            # card width in px (the pill stays put)
-display_max_height = 300       # pill + card never grow taller than this; long replies scroll so the newest words show
+display_mode = false           # start with the text on; "EV, activate display mode" / "deactivate display mode" toggles it
+display_width = 460            # the island's width when it holds text
+display_max_height = 300       # the island never grows taller than this; long replies scroll so the newest words show
 display_font_pt = 12
-display_linger_s = 8           # how long the card stays after EV finishes talking
-hide_delay_ms = 600
-fill = "#111111"
-fill_alpha = 235
-border = "#3a3a3a"
+display_linger_s = 8           # how long the text stays after EV finishes talking, before the island closes back up
+hide_delay_ms = 600            # only when idle_visible = false
+fill = "#000000"
+fill_alpha = 250
+border = "#2a2a2a"
 
 [memory]
 db_file = "ev.sqlite"
 profile_file = "profile.json"
 summary_every_turns = 8
-max_facts_in_prompt = 12
+max_facts_in_prompt = 24       # the facts seeded from config/seed_facts.toml take about 17 of these; the rest is room for facts you add
+seed_file = "config/seed_facts.toml"   # facts moved out of persona.md; seeded into memory once at first start-up
+fact_max_chars = 200           # a remembered fact's value is cut to this
+fact_overlap_min = 0.8         # a model-made remember/forget is silent only if this share of its words are words you said in your last three utterances; otherwise EV asks first
 chromadb_enabled = false
+
+[vault]
+# Memory lives in a folder of Markdown files (an Obsidian vault; Obsidian doesn't have to be running). EV writes only inside
+# <path>/<ev_folder>; the rest of the vault is read-only to it. Facts.md lines are trusted only if EV itself wrote that exact line.
+enabled = true
+path = "~/Documents/EV-Vault"  # created on first start-up if missing
+ev_folder = "EV"
+index_file = "vault_index.sqlite"   # rebuildable search index (SQLite FTS5), kept in data_dir
+poll_s = 15                    # how often the index looks for notes you edited
+max_note_kb = 512              # bigger notes are left out of the index
+recall_k = 4                   # snippets returned by recall
+daily_summaries = true         # append the rolling conversation summary to EV/Daily/<date>.md (off if general.log_conversations is false)
+auto_recall = false            # true = put up to auto_recall_k wrapped snippets from your notes in each request. Off: not measured with a real vault
+auto_recall_k = 2
+
+[proactive]
+# EV speaking up on its own (low battery, a long build finished, the morning brief...). Rules and guards live in
+# config/proactive.toml. "quiet for an hour" snoozes the spoken lines. Off here = EV only ever answers.
+enabled = true
+rules_file = "config/proactive.toml"
+# The dashboard can tune these guards (and writes them to ev.local.toml). They only ever override the [guards] table of the rules
+# file, and only within its limits. Leave them out to use the rules file's own values.
+# max_spoken_per_hour = 4
+# quiet_start = "22:30"
+# quiet_end = "07:30"
+# max_idle_s = 1800
+# defer_minutes = 10
+
+[dashboard]
+# A local page for watching EV and changing how it feels: http://127.0.0.1:<port>, opened by saying "open the dashboard" or from the
+# tray. Loopback only; every visit needs a one-time sign-in link EV opens for you. It cannot change policy.toml or anything that
+# widens what EV can reach (see docs/SECURITY.md). Off here = no listener at all.
+enabled = true
+port = 0                       # 0 = pick a free port each start
+
+[skills]
+# Routines made of ordinary tool calls, one TOML file each (see skills/work_mode.toml). Every step goes through the safety gate
+# on its own. "save that as <name>" turns the last few things you did into a new one; the model cannot create or change skills.
+dir = "skills"                 # EV may write new skill files here (policy.toml write_dirs {skills}), nowhere else
+save_window_min = 15           # "save that as ..." looks at what worked in the last this-many minutes...
+save_max_steps = 6             # ...and keeps at most this many of the newest steps
+
+[context]
+# A few lines about what is going on, put beside your request (never in the system prompt, so the prompt cache is untouched).
+# Only the lines your request is about are included; the app you are in always is. Window titles, file names and event titles
+# are text other people control, so the block is wrapped as untrusted data. Each signal can be switched off.
+enabled = true
+max_chars = 450                # the whole block, before the wrapper (about 110 tokens)
+foreground = true              # "Using Firefox: <page title>". A password manager, bank or other sensitive window shows the app only
+calendar = true                # the next event (needs calendar_source below)
+calendar_source = "none"       # "none" | "ics" (a file) | "outlook" (classic Outlook through COM). Read-only either way
+calendar_file = ""             # path to an .ics file when calendar_source = "ics"
+calendar_refresh_s = 300       # refreshed in the background, never while you wait
+recent_files = true            # up to three file names from Downloads, Desktop and the screenshot folder, last recent_files_minutes
+recent_files_minutes = 120
+battery = true
+git = true                     # branch and changed-file count of a repo open in the foreground editor or terminal
+repos = []                     # git repo folders to watch, e.g. ["C:/Users/you/Desktop/Projects/EV_AI"]
 
 [privacy]
 persist_audio = false

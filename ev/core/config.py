@@ -32,6 +32,28 @@ class Config:
         d.mkdir(parents=True, exist_ok=True)
         return d / name
 
+    def screenshot_dir(self) -> Path:
+        raw = self._data.get("screen", {}).get("screenshot_dir") or ""
+        return Path(raw) if raw else Path.home() / "Pictures" / "EV Screenshots"
+
+    def skills_dir(self) -> Path:
+        d = Path(str(self._data.get("skills", {}).get("dir", "skills")))
+        return d if d.is_absolute() else self.root / d
+
+    def vault_dir(self) -> Path | None:
+        """The folder inside the vault that EV may write to, or None when the vault is off."""
+        v = self._data.get("vault", {})
+        if not v.get("enabled", False) or not v.get("path"):
+            return None
+        return Path(str(v["path"])).expanduser() / str(v.get("ev_folder", "EV"))
+
+    def places(self) -> dict[str, Path]:
+        """Folders that policy.toml may name as {placeholders}, because their location is configured here, not there."""
+        out = {"screenshots": self.screenshot_dir(), "skills": self.skills_dir()}
+        if (vault := self.vault_dir()) is not None:
+            out["vault_ev"] = vault
+        return out
+
     @property
     def raw(self) -> dict[str, Any]:
         return self._data

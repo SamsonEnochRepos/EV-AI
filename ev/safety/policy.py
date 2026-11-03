@@ -67,10 +67,14 @@ def _compact(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
 class Policy:
-    def __init__(self, data: dict[str, Any], root: Path = ROOT):
+    def __init__(self, data: dict[str, Any], root: Path = ROOT, places: dict[str, Path] | None = None):
         self.d = data
         self.root = root
+        self.places = places or {}
         self.levels: dict[str, str] = data.get("tools", {})
         self.unknown = data.get("defaults", {}).get("unknown_tool", "blocked")
         self.arg_res = [re.compile(p, re.I) for p in data.get("blocked_patterns", {}).get("args", [])]
@@ -81,9 +85,11 @@ class Policy:
         self.confirm_combos = {normalize_combo(c) for c in ctl.get("confirm_key_combos", [])}
         self.typing_max = int(ctl.get("typing_max_chars", 500))
         self.confirm_ctl = [p.lower() for p in ctl.get("confirm_control_patterns", [])]
-        self.safe_dirs = [
-            (root / p).resolve() for p in data.get("files", {}).get("safe_dirs", [])
-        ]
+        files = data.get("files", {})
+        self.safe_dirs = self._dirs(files.get("safe_dirs", []))
+        self.open_dirs = self._dirs(files.get("open_dirs", []))
+        self.write_dirs = self._dirs(files.get("write_dirs", []))     # where EV's own code may create files (the vault checks this too)
+        self.open_exts = {str(e).lower().lstrip(".") for e in files.get("open_extensions", [])}
         self.shell_enabled = bool(data.get("shell", {}).get("enabled", False))
         self.shell_allow = data.get("shell", {}).get("allowlist", [])
         self.app_allow = {a.lower() for a in data.get("apps", {}).get("allowlist", [])}
@@ -98,11 +104,24 @@ class Policy:
         self.confirm_pattern_tools = set(cp.get("tools", []))
 
     @classmethod
-    def load(cls, path: Path) -> Policy:
-        return cls(load_toml(path))
+    def load(cls, path: Path, places: dict[str, Path] | None = None) -> Policy:
+        return cls(load_toml(path), places=places)
+
+    def _dirs(self, entries: list[str]) -> list[Path]:
+        """Folder list from policy.toml. {name} entries are filled from `places`; one that can't be (feature off) is dropped."""
+        out: list[Path] = []
+        for e in entries:
+            names = _PLACEHOLDER.findall(e)
+            if any(n not in self.places for n in names):
+                continue
+            out.append((self.root / _PLACEHOLDER.sub(lambda m: str(self.places[m.group(1)]), e)).resolve())
+        return out
 
     # path sandbox
     def path_in_safe_dirs(self, raw: str) -> bool:
+        return self.path_in_dirs(raw, self.safe_dirs)
+
+    def path_in_dirs(self, raw: str, dirs: list[Path]) -> bool:
         if "%" in raw or raw.startswith("~") or "$" in raw:
             return False  # no env-var / home expansion tricks
         try:
@@ -119,7 +138,20 @@ class Policy:
             real = Path(os.path.realpath(p))
         except (OSError, ValueError):
             return False
-        return any(real == s or s in real.parents for s in self.safe_dirs)
+        return any(real == s or s in real.parents for s in dirs)
+
+    def check_open_path(self, raw: str) -> Decision:
+        """Whether open_file may open this path. Called on the arguments, and again by the tool on the path it resolved
+        itself (the 'last' file), because opening a file can run it: only listed folders and only document/media types."""
+        raw = clean_text(raw).strip()
+        if not raw:
+            return Decision(Verdict.BLOCK, "no file given")
+        ext = Path(raw).suffix.lower().lstrip(".")
+        if ext not in self.open_exts:
+            return Decision(Verdict.BLOCK, "that kind of file can't be opened")
+        if not self.path_in_dirs(raw, self.open_dirs):
+            return Decision(Verdict.BLOCK, "that file is outside the folders I can open from")
+        return Decision(Verdict.ALLOW)
 
     def evaluate(self, tool: str, args: dict[str, Any] | None) -> Decision:
         args = args if isinstance(args, dict) else {}
@@ -141,6 +173,15 @@ class Policy:
             for key in ("path", "src", "dst", "dest"):
                 if key in args and not self.path_in_safe_dirs(str(args[key])):
                     return Decision(Verdict.BLOCK, "path is outside the safe folders")
+
+        if tool == "open_file":
+            path = str(args.get("path", "")).strip()
+            if path:
+                od = self.check_open_path(path)
+                if od.verdict is Verdict.BLOCK:
+                    return od
+            elif args.get("which") != "last":
+                return Decision(Verdict.BLOCK, "no file given")
 
         if tool == "open_app":
             name = str(args.get("name", "")).strip().lower()
@@ -189,6 +230,9 @@ class Policy:
                 return Decision(Verdict.BLOCK, f"{combo} is not permitted")
             if combo in self.confirm_combos:
                 return Decision(Verdict.CONFIRM, f"press {combo}")
+
+        if tool == "manage_skill" and str(args.get("action")) == "delete":
+            return Decision(Verdict.CONFIRM, "delete a skill")
 
         if tool == "open_app" and args.get("admin") is True:
             return Decision(Verdict.CONFIRM, "open an app with administrator rights")

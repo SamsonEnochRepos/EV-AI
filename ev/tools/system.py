@@ -203,6 +203,11 @@ def _run_elevated(path: str, args: str | None = None) -> None:
         raise PermissionError("Windows didn't allow that, or the administrator prompt was declined")
 
 
+def open_path(path: str) -> None:
+    """Open a file with the app Windows has registered for its type. The caller has already checked the path against policy."""
+    os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+
+
 def launch_app(name: str, allow_start_menu: bool = True, elevate: bool = False) -> str:
     """Launch an app by friendly name. Returns a short description of what was launched.
 

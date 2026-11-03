@@ -9,9 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ev.context.calendar import CachedCalendar
 from ev.core.config import Config
 from ev.memory.store import MemoryStore
-from ev.safety.policy import Policy
+from ev.memory.vault import Vault, VaultError
+from ev.memory.vault_index import VaultIndex
+from ev.safety.policy import Policy, Verdict
+from ev.safety.provenance import SOURCE_SAID, TurnState
 
 from . import system, weather, web, windows
 from .base import Tool, ToolRegistry, ToolResult
@@ -25,6 +29,11 @@ class ToolContext:
     scheduler: Scheduler
     policy: Policy
     now: Any = dt.datetime.now  # injectable for tests
+    notes_dir: Path | None = None  # where take_note keeps its daily file; None = data/notes (tests and evals point it elsewhere)
+    vault: Vault | None = None     # where facts live; None = the SQLite facts table (vault switched off)
+    index: VaultIndex | None = None
+    turn: TurnState | None = None  # what the system observed this turn; says how a fact write should be labelled
+    calendar: CachedCalendar | None = None   # read-only; None when no calendar is configured (then there is no get_agenda tool)
 
 
 def _spoken_duration(seconds: int) -> str:
@@ -57,6 +66,28 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         except OSError as e:
             return ToolResult(False, f"I couldn't start {name}: {e.strerror or type(e).__name__}.")
         return ToolResult(True, f"Opened {launched}" + (" as administrator." if admin else "."))
+
+    def open_file(path: str = "", which: str = "") -> ToolResult:
+        target = path.strip()
+        if not target:
+            target, kind = ctx.memory.last_artifact()
+            if not target:
+                return ToolResult(False, "I haven't made anything yet that I could open.")
+        else:
+            kind = ""
+        # Policy judged the arguments; "last" has no path in them, so judge the file this resolved to as well.
+        decision = ctx.policy.check_open_path(target)
+        if decision.verdict is Verdict.BLOCK:
+            return ToolResult(False, f"I can't open that: {decision.reason}.")
+        p = Path(target)
+        p = p if p.is_absolute() else ctx.policy.root / p
+        if not p.is_file():
+            return ToolResult(False, "That file isn't there any more.")
+        try:
+            system.open_path(str(p))
+        except OSError as e:
+            return ToolResult(False, f"I couldn't open it: {e.strerror or type(e).__name__}.")
+        return ToolResult(True, f"Opened the {kind}." if kind else "Opened the file.", {"path": str(p)})
 
     def open_website(site: str = "", query: str = "", url: str = "", browser: str = "") -> ToolResult:
         target = web.build_url(site, query, url)
@@ -146,6 +177,14 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         when = dt.datetime.fromtimestamp(due).strftime("%I:%M %p").lstrip("0")
         return ToolResult(True, f"Okay, I'll remind you at {when}.")
 
+    def list_reminders() -> ToolResult:
+        rows = ctx.memory.pending_reminders()
+        if not rows:
+            return ToolResult(True, "You have no reminders.")
+        parts = [f"{text} at {dt.datetime.fromtimestamp(due).strftime('%I:%M %p').lstrip('0')}" for _id, text, due in rows[:5]]
+        n = len(rows)
+        return ToolResult(True, f"You have {n} reminder{'s' if n != 1 else ''}: " + "; ".join(parts) + ".")
+
     def media_control(action: str) -> ToolResult:
         system.press_media_key(action)
         return ToolResult(True, _MEDIA_SAID.get(action, "Done."))
@@ -168,7 +207,7 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         web = ctx.cfg["web"]
         if not (web.get("enabled", True) and web.get("weather_enabled", True)):
             return ToolResult(False, "Weather lookups are turned off.")
-        place = place.strip() or _home_place(ctx.memory)
+        place = place.strip() or _home_place(ctx.vault.profile_facts(100) if ctx.vault is not None else ctx.memory.facts(100))
         try:
             text = weather.get_weather(place, day, web.get("units", "metric"), float(web["timeout_s"]))
         except weather.WeatherError as e:
@@ -187,9 +226,15 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         if hit and time.monotonic() - hit[0] < float(web.get("cache_s", 600)):
             return _search_result(hit[1])
         # backend pinned: ddgs "auto" fans out to Bing/Brave/Google/Yahoo/..., but only DuckDuckGo is allowed
+        text_search = [lambda d: d.text(query, max_results=n, backend="duckduckgo")] * 3
+        news_search = [lambda d: d.news(query, max_results=n, backend="duckduckgo")]
+        # Text search ranks evergreen pages (last year's storm, a Wikipedia stub), and the model can't tell they are old.
+        # For anything recent, ask for the past week first, then dated news, then the past month.
+        recent_search = [lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="w"), news_search[0],
+                         lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="w"),
+                         lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="m")]
         rows = _first_rows(
-            [lambda d: d.text(query, max_results=n, backend="duckduckgo")] * 3
-            + [lambda d: d.news(query, max_results=n, backend="duckduckgo")],
+            recent_search if _RECENT.search(query) else text_search + news_search,
             lambda: DDGS(timeout=web["timeout_s"]), pause_s=float(web.get("retry_pause_s", 1.5)))
         if rows:
             searches[key] = (time.monotonic(), rows)
@@ -200,25 +245,73 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
             return ToolResult(False, "The search service isn't answering right now. Try again in a moment.")
         if not rows:
             return ToolResult(False, "I didn't find anything.")
-        text = "\n".join(f"- {r.get('title', '')}: {r.get('body', '')}".strip() for r in rows)
+        text = "\n".join(
+            "- " + " ".join(p for p in (str(r.get("date") or "")[:10], f"{r.get('title', '')}: {r.get('body', '')}".strip()) if p)
+            for r in rows)
         return ToolResult(True, text, {"count": len(rows)}, untrusted=True, source="web_search",
                           hint=("Answer the user's question in one or two short spoken sentences using only facts that are written "
-                                "in these results. Don't read out site names or links. Never invent numbers, "
+                                "in these results. Where results carry dates, trust the newest one. Don't read out site names or links. Never invent numbers, "
                                 "conditions or names. If the results only describe what a website offers and don't "
                                 "state the answer (typical for live weather), say you couldn't get the live "
                                 "details and suggest checking a weather site."))
 
-    def remember_fact(key: str, value: str) -> ToolResult:
-        ctx.memory.remember(key, value)
+    def remember_fact(key: str, value: str, about: str = "") -> ToolResult:
+        if ctx.vault is None:
+            ctx.memory.remember(key, value)
+            return ToolResult(True, "Got it, I'll remember that.")
+        # The label comes from the system (Brain sets it after the gate has run), never from the model's arguments.
+        source = (ctx.turn.call_source if ctx.turn else "") or SOURCE_SAID
+        try:
+            ctx.vault.add_fact(key, value, source, about)
+        except VaultError as e:
+            return ToolResult(False, str(e))
         return ToolResult(True, "Got it, I'll remember that.")
 
-    def forget_fact(key: str) -> ToolResult:
-        ok = ctx.memory.forget(key)
+    def forget_fact(key: str, about: str = "") -> ToolResult:
+        try:
+            ok = ctx.vault.forget_fact(key, about) if ctx.vault is not None else ctx.memory.forget(key)
+        except VaultError as e:
+            return ToolResult(False, str(e))
         return ToolResult(ok, "Forgotten." if ok else "I don't have that saved.")
+
+    def keep_fact(id: str) -> ToolResult:               # noqa: A002  (the argument is called id in the tool schema)
+        assert ctx.vault is not None
+        try:
+            fact = ctx.vault.keep_unconfirmed(id)
+        except VaultError as e:
+            return ToolResult(False, str(e))
+        return ToolResult(True, f"Okay, I'll keep that: {fact.key.replace('_', ' ')}.")
+
+    def get_agenda(day: str = "today") -> ToolResult:
+        assert ctx.calendar is not None
+        target = ctx.now().date() + dt.timedelta(days=1 if day == "tomorrow" else 0)
+        events = ctx.calendar.on_day(target)
+        if not events:
+            return ToolResult(True, f"Nothing on the calendar {day}.")
+        text = "\n".join(f"- {'all day' if e.all_day else e.start.strftime('%I:%M %p').lstrip('0')}: {e.title}" for e in events[:12])
+        return ToolResult(True, text, {"count": len(events)}, untrusted=True, source="calendar",
+                          hint="Tell the user their day in one or two short spoken sentences: how many things there are and "
+                               "the first one. Read out more only if they ask.")
+
+    def recall(query: str = "", when: str = "") -> ToolResult:
+        assert ctx.index is not None
+        k = int(ctx.cfg.get("vault", "recall_k", 4))
+        hits = ctx.index.search(query, when or None, k)
+        if not hits:
+            return ToolResult(True, "Nothing in the notes about that. Tell the user you don't remember it. Don't guess or "
+                                    "make anything up; you can offer to remember it if they tell you.")
+        text = "\n".join(f"- {h.path} ({h.date}), {h.heading}: {h.text}" for h in hits)
+        return ToolResult(True, text, {"count": len(hits)}, untrusted=True, source="vault",
+                          hint=("Answer in one or two short spoken sentences using only what these notes say, and say roughly "
+                                "when it was written if that helps. Don't read out file names or paths. If they don't answer "
+                                "the question, say you don't remember it. Never add anything the notes don't say."))
 
     def take_note(text: str) -> ToolResult:
         ctx.memory.add_note(text)
-        return ToolResult(True, "Noted.")
+        path = _append_note_file(ctx.notes_dir or notes_dir(ctx.cfg), text, ctx.now())
+        if path:
+            ctx.memory.set_last_artifact(path, "note")
+        return ToolResult(True, "Noted.", {"path": str(path)} if path else {})
 
     S = "string"
     reg.register(Tool("get_time_date", "Get the current time and date.", {}, get_time_date, direct=True))
@@ -226,6 +319,9 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
                       {"name": {"type": S, "description": "App name, e.g. Spotify", "maxLength": 60},
                        "admin": {"type": "boolean"}},
                       open_app, ("name",), timeout_s=20, direct=True))
+    reg.register(Tool("open_file", "Open the last screenshot or note EV saved (which=last), or a file path the user gave.",
+                      {"which": {"type": S, "enum": ["last"]}, "path": {"type": S, "maxLength": 300}},
+                      open_file, timeout_s=15, direct=True))
     reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one.",
                       {"site": {"type": S, "description": "youtube, github, a domain...", "maxLength": 60},
                        "query": {"type": S, "maxLength": 200},
@@ -244,6 +340,7 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         "text": {"type": S, "maxLength": 200},
         "in_minutes": {"type": "number", "minimum": 0, "maximum": 525600},
         "at": {"type": S, "maxLength": 12}}, set_reminder, ("text",), direct=True))
+    reg.register(Tool("list_reminders", "List the user's pending reminders.", {}, list_reminders, direct=True))
     reg.register(Tool("media_control", "Control media playback.", {
         "action": {"type": S, "enum": ["play_pause", "next", "previous", "stop"]}},
         media_control, ("action",), direct=True))
@@ -255,11 +352,22 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         "day": {"type": S, "enum": ["today", "tomorrow"]}}, get_weather, timeout_s=20, direct=True))
     reg.register(Tool("web_search", "Search the web for news, facts and other current information (not weather).",
                       {"query": {"type": S, "maxLength": 200}}, web_search, ("query",), timeout_s=30))
+    about_spec = {"type": S, "description": "another person or project; omit for the user", "maxLength": 40}
     reg.register(Tool("remember_fact", "Save a fact about the user for later.", {
         "key": {"type": S, "description": "short label, e.g. favorite_color", "maxLength": 60},
-        "value": {"type": S, "maxLength": 300}}, remember_fact, ("key", "value"), direct=True))
+        "value": {"type": S, "maxLength": 300}, "about": about_spec}, remember_fact, ("key", "value"), direct=True))
     reg.register(Tool("forget_fact", "Delete a saved fact about the user.",
-                      {"key": {"type": S, "maxLength": 60}}, forget_fact, ("key",), direct=True))
+                      {"key": {"type": S, "maxLength": 60}, "about": about_spec}, forget_fact, ("key",), direct=True))
+    if ctx.index is not None:
+        reg.register(Tool("recall", "Search the user's notes for what they said or wrote earlier. when: today, yesterday, last week, a month.",
+                          {"query": {"type": S, "maxLength": 120}, "when": {"type": S, "maxLength": 30}}, recall,
+                          timeout_s=10))
+    if ctx.calendar is not None:
+        reg.register(Tool("get_agenda", "What is on the user's calendar today or tomorrow.",
+                          {"day": {"type": S, "enum": ["today", "tomorrow"]}}, get_agenda, timeout_s=5))
+    if ctx.vault is not None:
+        reg.register(Tool("keep_fact", "Keep a hand-written note in the facts file as a fact.",
+                          {"id": {"type": S, "maxLength": 12}}, keep_fact, ("id",), direct=True, llm_visible=False))
     reg.register(Tool("take_note", "Save a quick note for the user.",
                       {"text": {"type": S, "maxLength": 1000}}, take_note, ("text",), direct=True))
     return reg
@@ -294,11 +402,12 @@ def _first_rows(attempts: list[Callable[[Any], Any]], make_client: Callable[[], 
     return None if errored == len(attempts) else []
 
 
+_RECENT = re.compile(r"\b(latest|recent|recently|today|tonight|yesterday|now|current|currently|news|breaking|this (?:week|month)|"
+                     r"happening|just)\b", re.I)
 _HOME_KEYS = ("location", "city", "home_city", "hometown", "home", "lives_in", "current_city", "place")
 
 
-def _home_place(memory: MemoryStore) -> str:
-    facts = memory.facts(100)
+def _home_place(facts: dict[str, str]) -> str:
     for k in _HOME_KEYS:
         if facts.get(k):
             return facts[k]
@@ -309,6 +418,22 @@ def notes_dir(cfg: Config) -> Path:
     p = cfg.root / "data" / "notes"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _append_note_file(folder: Path, text: str, when: dt.datetime) -> Path | None:
+    """Add the note to today's file, one line per note. The SQLite copy is the record; a failure here only means "open it" has no file."""
+    path = folder / f"{when:%Y-%m-%d}.md"
+    line = " ".join(text.split())
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        new = not path.exists()
+        with path.open("a", encoding="utf-8") as f:
+            if new:
+                f.write(f"# Notes {when:%Y-%m-%d}\n\n")
+            f.write(f"- {when:%H:%M} {line}\n")
+    except OSError:
+        return None
+    return path
 
 
 _ = time  # keep import for monkeypatching in tests

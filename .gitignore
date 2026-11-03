@@ -54,6 +54,8 @@ models/
 # --- Eval output (the generated files are reproducible; the suites themselves are tracked)
 evals/results/*.json
 evals/results/overlay/
+# top-level evals/ holds only generated output (ev/evals/ is the tracked code)
+/evals/
 
 # --- Scratch files from install, training and soak scripts
 scripts/*.log
@@ -69,5 +71,12 @@ scripts/conda_*.log
 .DS_Store
 Thumbs.db
 *.tmp
+*.evtmp
 *.bak
 *.orig
+
+# --- A vault pointed at a folder inside the repo is the user's notes, not code
+EV-Vault/
+
+# --- Fine-tuning data is your conversations: never commit it (scripts/finetune/export_data.py writes here)
+data/training/

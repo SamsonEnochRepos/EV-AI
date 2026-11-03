@@ -53,6 +53,7 @@ def speech_blocks():
 @pytest.fixture
 def app(tmp_path, monkeypatch):
     cfg = load_config(overrides={"general": {"data_dir": str(tmp_path / "data"), "log_dir": str(tmp_path / "logs")},
+                                 "vault": {"path": str(tmp_path / "vault")},        # never the real Documents folder
                                  "overlay": {"enabled": False}, "tray": {"enabled": False},
                                  "conversation": {"followup_enabled": False, "voice_interrupt": False}})   # fake mic always "hears" speech
     a = EVApp(cfg)
@@ -94,11 +95,20 @@ def test_llm_turn_streams_sentences_and_returns_to_idle(app):
     assert app.sm.state is State.IDLE
 
 
+def test_real_prompt_leaves_room_for_history(app):
+    """The whole tool list as the running app registers it (screen, control, vault tools included), not the lightweight test
+    registry. If this fails, conversation history is being squeezed out of num_ctx: trim a description or a persona line."""
+    b = app.brain
+    fixed = b._est_tokens(b.system_prompt()) + b._est_tokens(app.registry.schemas())
+    assert len(app.registry.schemas()) >= 25, "screen/control tools did not register; this test would prove nothing"
+    assert b.ctx_budget - fixed >= 400, f"fixed prompt ~{fixed} of {b.ctx_budget}: under 400 tokens left for history"
+
+
 def test_tool_turn_enters_acting_state(app):
-    app.heard = "remember my dog is Biscuit"
+    app.heard = "my dog is Biscuit, keep that in mind"        # not "remember ...": that would take the fast path, not the model
     use_fake_llm(app, FakeOllama([tool_reply("remember_fact", {"key": "dog", "value": "Biscuit"}), text_reply("Got it.")]))
     app.on_trigger()
-    assert app.memory.recall("dog") == "Biscuit"
+    assert app.vault is not None and app.vault.profile_facts()["dog"] == "Biscuit"     # facts live in the vault now
     assert State.ACTING in app.states
 
 
@@ -385,6 +395,7 @@ def test_display_mode_is_off_by_default_and_remembered(app, tmp_path):
     from ev.core.config import load_config
 
     again = EVApp(load_config(overrides={"general": {"data_dir": str(tmp_path / "data"), "log_dir": str(tmp_path / "logs")},
+                                         "vault": {"path": str(tmp_path / "vault")},
                                          "overlay": {"enabled": False}, "tray": {"enabled": False}}))
     try:
         assert again.display_mode is True
