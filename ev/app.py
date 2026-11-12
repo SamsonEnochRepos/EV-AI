@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from ev.audio.capture import MicError, Recorder, SharedMic, mic_blocks
+from ev.audio.endpoint import looks_unfinished
 from ev.audio.interrupt import InterruptMonitor
 from ev.audio.playback import Player
 from ev.audio.trigger import Hotkeys, WakeWord
@@ -26,6 +27,8 @@ from ev.dashboard.hub import Hub
 from ev.dashboard.server import DashboardServer
 from ev.llm.brain import Brain
 from ev.llm.client import LLMError, OllamaClient, OllamaDown
+from ev.llm.fastpath import is_stop
+from ev.llm.selfinfo import TOPICS, SelfInfo
 from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.overlay.client import OverlayClient
@@ -36,7 +39,7 @@ from ev.safety.gate import SafetyGate, parse_yes_no
 from ev.safety.policy import Policy
 from ev.safety.provenance import TurnState
 from ev.skills.store import SkillStore
-from ev.stt.whisper import STT
+from ev.stt.whisper import STT, Transcript, looks_like_junk
 from ev.tools.base import ToolRegistry
 from ev.tools.builtin import ToolContext, build_tools
 from ev.tools.scheduler import Scheduler
@@ -48,6 +51,19 @@ log = get_logger("app")
 # Whisper tends to invent these from room noise; in a follow-up window they mean "nobody spoke".
 _NOISE = re.compile(r"^\W*(you|bye|(?:u+|a+|e+)?[hm]+|um+|uh+|er+|thanks for watching|thank you for watching)\W*$", re.I)
 # The user is wrapping up: answer, but don't keep the mic open afterwards.
+# Talking over EV counts only when it starts with EV's name ("EV, don't open it", "oh Evie, wait"): anything else is a side
+# conversation, the TV, or a murmur. Whisper spells the name several ways, so the likely ones are all accepted.
+_ADDRESSED = re.compile(
+    r"^\W*(?:(?:hey|oh|ok(?:ay)?|um|uh|so|well|yeah|wait|hold on|sorry)[, ]+){0,2}"
+    r"(?:evie|evy|evi|eevee|eevie|eve|ev|e\.? ?v\.?)\b", re.I)
+# Whisper often does not write the name down ("Eveled", "Eevee", "Evvy"). A first word that sounds like it still counts, unless it is
+# an ordinary word that merely starts the same way. As a second opinion the wake-word model, which was trained on the name, listens to
+# the same audio (`_name_score`).
+_FIRST_WORD = re.compile(r"^\W*(?:(?:hey|oh|ok(?:ay)?|um|uh|so|well|yeah|wait|hold on|sorry)[, ]+){0,2}(?P<w>[a-z']+)", re.I)
+_SOUNDS_LIKE_EV = re.compile(r"^(?:ev|eev|eve|evi|evy|ee|yev)[a-z]{0,5}$")
+_NOT_THE_NAME = frozenset(
+    "even evenly ever every everyone everybody everything everywhere event events eventually evening evil evidence evident evict "
+    "evade evoke evolve evolved evolution evaluate evaporate".split())
 _WRAP_UP = re.compile(r"^\W*(no,? )?(thanks|thank you|that'?s all|that'?s it|nothing|nope|never ?mind|goodbye|bye|stop)\b", re.I)
 
 
@@ -82,8 +98,11 @@ class EVApp:
         self.overlay.send_display(self.display_mode)
         self._register_display_tool()
         self._register_screen_tools()
+        self.selfinfo = SelfInfo(cfg, self._live_self)
+        self._register_self_tool()
         self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting,
-                           vault=self.vault, index=self.index, turn=self.turn, context=self.context, skills=self.skills)
+                           vault=self.vault, index=self.index, turn=self.turn, context=self.context, skills=self.skills,
+                           selfinfo=self.selfinfo)
         self.brain.on_facts_changed = self.brain.refresh_prompt_cache      # a fact changed: re-prime the prompt cache once
         self.brain.on_tools_changed = self.brain.refresh_prompt_cache      # the skill list changed, so the tool schema did
         self.proactive = self._build_proactive()
@@ -100,6 +119,11 @@ class EVApp:
         self._following_up = False                        # True while the follow-up window is listening
         self._interrupted = threading.Event()             # the user talked over EV's reply
         self._carry: list[np.ndarray] = []                # mic blocks captured while interrupting, fed to the next recording
+        self._name_model: object | None = None            # a second wake-word model, used only to hear whether EV was called by name
+        self._name_lock = threading.Lock()
+        self._since: int | None = None                    # where on the shared microphone the next recording picks up (after a barge-in)
+        self._mic_permanent = False                       # the shared microphone stays open all the time (the wake word listens on it)
+        self._held = ""                                   # a request cut off by the user speaking again before EV did or ran anything
         self._mic: SharedMic | None = None                # one stream for the whole conversation (conversation.continuous_mic)
         self._out_level = 0.0
         self._level_pub_at = 0.0
@@ -128,6 +152,9 @@ class EVApp:
                                   on_artifact=self.memory.set_last_artifact)
             register_control_tools(self.registry, self.cfg, self.policy, self.gate)
             self._register_agent_tool()
+            from ev.vision.camera import register_camera_tool
+
+            register_camera_tool(self.registry, self.cfg, self.policy, self.client)
         except Exception:
             log.exception("screen/control tools unavailable")
 
@@ -147,6 +174,23 @@ class EVApp:
         self.registry.register(Tool(
             "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
             {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True))
+
+    def _live_self(self) -> dict[str, Any]:
+        """What is really loaded right now, for "what model are you?": the chat model Ollama picked, the speech model and the
+        device it landed on, the voice engine that survived a fallback. Read when asked, so it is never stale."""
+        stt, speaker = getattr(self, "stt", None), getattr(self, "speaker", None)
+        return {"llm_model": self.client.model, "stt_model": getattr(stt, "model_name", ""), "stt_device": getattr(stt, "device", ""),
+                "tts_engine": getattr(getattr(speaker, "engine", None), "name", "")}
+
+    def _register_self_tool(self) -> None:
+        """about_self: voice only (the fast path asks for it; it is not in the model's tool list, so it costs no prompt)."""
+        from ev.tools.base import Tool, ToolResult
+
+        topics = list(TOPICS)
+        self.registry.register(Tool(
+            "about_self", "Say what model, voice, hearing or technology EV is built on.",
+            {"topic": {"type": "string", "enum": topics}}, lambda topic="overview": ToolResult(True, self.selfinfo.answer(topic)),
+            (), direct=True, llm_visible=False))
 
     # ---- dashboard: a loopback page, opened on request with a one-time sign-in link
     def _register_dashboard_tool(self) -> None:
@@ -258,6 +302,7 @@ class EVApp:
         self._start_dashboard()
         self.hotkeys.start()
         if self.wake:
+            self._open_permanent_mic()
             self.wake.start()
             threading.Thread(target=self._report_wake, name="wake-status", daemon=True).start()
         threading.Thread(target=self._warm, name="warm", daemon=True).start()
@@ -292,11 +337,16 @@ class EVApp:
                 ("app list", system.warm_app_index)]
         if self.speaker:
             jobs.append(("voice", self.speaker.warm))
+        if self.wake:
+            jobs.append(("name model", self._warm_name_model))
         threads = [threading.Thread(target=run, args=job, name=f"warm-{job[0]}", daemon=True) for job in jobs]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+
+    def _warm_name_model(self) -> None:
+        self._name_score([np.zeros(1280, np.int16)])      # loads the model now, not in the middle of someone's interruption
 
     def _init_speaker(self) -> None:
         try:
@@ -343,6 +393,8 @@ class EVApp:
         self.hotkeys.stop()
         if self.wake:
             self.wake.stop()
+        self._mic_permanent = False
+        self._close_shared_mic()
         self.scheduler.stop()
         if self.dashboard:
             self.dashboard.stop()
@@ -491,10 +543,29 @@ class EVApp:
         except Exception:
             log.exception("tray unavailable")
 
-    def _blocks(self, cfg: Config, stop: Callable[[], bool]) -> Iterator[np.ndarray]:
-        """Mic blocks for whoever is listening: the conversation's shared stream if one is open, else a stream of its own."""
+    def _blocks(self, cfg: Config, stop: Callable[[], bool], since: int | None = None) -> Iterator[np.ndarray]:
+        """Mic blocks for whoever is listening: the shared stream if one is open (from `since` on, if given), else a stream of its own."""
         mic = self._mic
-        return mic.blocks(stop) if mic is not None and mic.is_open else mic_blocks(cfg, stop)
+        return mic.blocks(stop, since=since) if mic is not None and mic.is_open else mic_blocks(cfg, stop)
+
+    def _mark_now(self) -> int | None:
+        mic = self._mic
+        return mic.mark() if mic is not None and mic.is_open else None
+
+    def _open_permanent_mic(self) -> None:
+        """With the wake word on, keep ONE microphone stream open and let the wake word listen on it. The stream was open anyway
+        (the wake word held its own); the difference is that the recorder can now start from the moment the wake word fired
+        instead of from whenever a second stream finished opening, which lost the first words of "Evie, open the dashboard"."""
+        if self.wake is None or not self.cfg.raw.get("conversation", {}).get("continuous_mic", True) or self._mic is not None:
+            return
+        mic = SharedMic(self.cfg)
+        try:
+            mic.open()
+        except MicError as e:
+            log.warning("shared microphone unavailable (%s); the wake word opens its own stream", e)
+            return
+        self._mic, self._mic_permanent = mic, True
+        self.wake.source = mic
 
     def _open_shared_mic(self) -> None:
         if not self.cfg.raw.get("conversation", {}).get("continuous_mic", False) or self._mic is not None:
@@ -508,6 +579,8 @@ class EVApp:
         self._mic = mic
 
     def _close_shared_mic(self) -> None:
+        if self._mic_permanent:
+            return                                        # the wake word is listening on it
         mic, self._mic = self._mic, None
         if mic is not None:
             mic.close()
@@ -576,42 +649,144 @@ class EVApp:
             return None
         mon = InterruptMonitor(self.cfg, make_vad("silero", self.cfg["audio"]["vad_aggressiveness_threshold"]),
                                lambda: self._out_level, self._on_talk_over, self._blocks)
+        if conv.get("interrupt_needs_name", True):
+            mon.verify = self._addressed_to_ev
         mon.start()
         return mon
 
-    def _on_talk_over(self, blocks: list[np.ndarray]) -> None:
+    def _addressed_to_ev(self, blocks: list[np.ndarray]) -> bool:
+        """Was the speech heard over EV addressed to it? Only then does it stop talking."""
+        try:
+            said = self.stt.transcribe(np.concatenate(blocks)).text
+        except Exception:                                  # noqa: BLE001  (no speech model: nothing can interrupt by voice)
+            log.exception("could not check whether EV was addressed")
+            return False
+        why = ""
+        ok = bool(_ADDRESSED.match(said)) or is_stop(said)          # a bare "stop" / "be quiet" is never anything but a command
+        if ok:
+            why = "starts with its name"
+        else:
+            m = _FIRST_WORD.match(said)
+            word = m.group("w").lower() if m else ""
+            if word in _NOT_THE_NAME:
+                why = ""
+            elif _SOUNDS_LIKE_EV.match(word):
+                ok, why = True, f"{word!r} sounds like its name"
+            else:
+                score = self._name_score(blocks)
+                if score >= float(self.cfg.raw.get("conversation", {}).get("interrupt_name_score", 0.5)):
+                    ok, why = True, f"the wake-word model heard its name ({score:.2f})"
+        log.info("heard over EV: %r -> %s", said, f"addressed to EV ({why}), stopping" if ok else "not for EV, carrying on")
+        return ok
+
+    def _name_score(self, blocks: list[np.ndarray]) -> float:
+        """How much the wake-word model thinks EV's name is in this audio (0..1). It was trained on the name, so it can hear "Evie"
+        when the speech model writes something else down. 0 when there is no wake-word model (hotkey mode)."""
+        if self.wake is None:
+            return 0.0
+        try:
+            with self._name_lock:
+                if self._name_model is None:
+                    self._name_model = self.wake._load()
+                model: Any = self._name_model
+                pcm = np.concatenate([np.concatenate(blocks).astype(np.int16)[: 2 * 16000], np.zeros(8000, np.int16)])
+                model.reset()
+                top = 0.0
+                for i in range(0, len(pcm) - 1279, 1280):
+                    top = max(top, max(model.predict(pcm[i:i + 1280]).values(), default=0.0))
+                return float(top)
+        except Exception:                                  # noqa: BLE001  (no model: the transcript alone decides)
+            log.warning("could not score the name with the wake-word model", exc_info=True)
+            return 0.0
+
+    def _on_talk_over(self, blocks: list[np.ndarray], resume_from: int | None = None) -> None:
         self._carry = blocks
+        self._since = resume_from
         self._interrupted.set()
         if self.speaker:
             self.speaker.stop()
+
+    def _transcribe_whole_sentence(self, audio: np.ndarray) -> Transcript:
+        """Transcribe, and if what was said stops on a word no sentence ends on ("open the", "can you", "and"), keep the mic
+        open a little longer for the rest and transcribe the two parts together. A pause is not the end of a sentence."""
+        conv = self.cfg.raw.get("conversation", {})
+        rounds, window = int(conv.get("finish_rounds", 2)), float(conv.get("finish_window_s", 1.8))
+        mark = self._mark_now()                           # what is said while this is being transcribed is kept on the shared mic
+        heard = self.stt.transcribe(audio)
+        for _ in range(max(0, rounds) if mark is not None else 0):
+            if self._abort.is_set() or not looks_unfinished(heard.text):
+                break
+            log.info("sounds unfinished (%r); listening %.1f s more", heard.text, window)
+            self.sm.to(State.LISTENING)
+            more = self.recorder.record(self._blocks(self.cfg, lambda: False, mark), wait_for_speech_s=window)
+            self.sm.to(State.TRANSCRIBING)
+            if more is None:
+                break
+            audio = np.concatenate([audio, more])
+            mark = self._mark_now()
+            heard = self.stt.transcribe(audio)
+        return heard
 
     def _one_turn(self, wait_s: float = 6.0, followup: bool = False, turn: int = 0) -> float | None:
         """Listen, think, speak. Returns the follow-up listening window in seconds, or None if we're done."""
         self.sm.to(State.LISTENING)
         self.brain.rewarm_if_cold()                       # reload the model while the user is still talking
         carried, self._carry = self._carry, []
+        since, self._since = self._since, None
+        if since is None and not followup and self.wake is not None:
+            since = self.wake.take_mark()                 # the wake word fired here: start listening from just before this moment
+        held, self._held = self._held, ""                 # a request the user cut off while EV was still thinking
         self._interrupted.clear()
         try:
-            audio = self.recorder.record(itertools.chain(carried, self._blocks(self.cfg, lambda: False)),
+            audio = self.recorder.record(itertools.chain(carried, self._blocks(self.cfg, lambda: False, since)),
                                          wait_for_speech_s=wait_s)
         except MicError:
             self.sm.to(State.ERROR, force=True)
             self.say_direct("I can't hear anything. I can't open the microphone.")
             return None
-        if audio is None or self._abort.is_set():
+        if self._abort.is_set() or (audio is None and not held):
             self.sm.to(State.IDLE, force=True)
             return None
-        self.sm.to(State.TRANSCRIBING)
-        text = self.stt.transcribe(audio).text
-        log.info("heard%s: %s", " (follow-up)" if followup else "", text)
-        if not text.strip() or self._abort.is_set() or (followup and _NOISE.match(text)):
+        text = held
+        if audio is not None:
+            self.sm.to(State.TRANSCRIBING)
+            rec = dict(self.recorder.last)
+            heard = self._transcribe_whole_sentence(audio)
+            text = heard.text
+            log.info("heard%s: %s   [%.1f s, longest pause %d ms, ended on %s]", " (follow-up)" if followup else "", text,
+                     float(rec.get("seconds", 0)), int(rec.get("longest_pause_ms", 0)), rec.get("ended", "?"))
+            # With a held request the new words only need to be real words: "Australia" alone is a short, shaky transcript,
+            # but it finishes "what's the capital of".
+            if self._abort.is_set():
+                self.sm.to(State.IDLE, force=True)
+                return None
+            junk = not text.strip() if held else looks_like_junk(heard)
+            if junk or (followup and _NOISE.match(text) and not held):
+                if text.strip():
+                    log.info("ignored as noise (logprob %.2f, no-speech %.2f)", heard.avg_logprob, heard.no_speech_prob)
+                if not held:
+                    self.sm.to(State.IDLE, force=True)
+                    return None
+                text = held                              # nothing usable came after all: answer what was asked
+            elif held:
+                text = f"{held} {text}".strip()
+                log.info("merged with the request it continues: %s", text)
+        else:
+            log.info("nothing more was said; answering the held request: %s", held)
+        if is_stop(text):                                 # "Evie stop": silence, not a question for the model (it used to answer with nonsense)
+            log.info("stop command (%r): staying quiet", text)
+            if self.speaker:
+                self.speaker.stop()
             self.sm.to(State.IDLE, force=True)
             return None
         self._last_heard = text
         self._show("user", text)
         self.sm.to(State.THINKING)
         first = {"v": True}
-        monitor: InterruptMonitor | None = None
+        # Listening while EV thinks (conversation.listen_while_thinking): the user speaking again before EV has said or done
+        # anything cancels this turn and joins it to what they say next.
+        monitor: InterruptMonitor | None = (
+            self._start_monitor() if self.cfg.raw.get("conversation", {}).get("listen_while_thinking", False) else None)
 
         def on_sentence(s: str) -> None:
             nonlocal monitor
@@ -620,7 +795,7 @@ class EVApp:
             if first["v"]:
                 first["v"] = False
                 self.sm.to(State.SPEAKING, force=True)
-                monitor = self._start_monitor()
+                monitor = monitor or self._start_monitor()
             self._show("ev", s, append=True)
             if self.speaker:
                 self.speaker.say(s)
@@ -640,6 +815,9 @@ class EVApp:
             if monitor:
                 monitor.stop()                            # releases the mic before the recorder reopens it
         if self._interrupted.is_set() and not self._abort.is_set():
+            if first["v"] and not res.tool_log and not res.error:
+                self._held = text                         # EV had said and done nothing yet: this request waits for the rest
+                log.info("interrupted before EV answered; holding %r for what comes next", text)
             log.info("interrupted by voice; listening")
             return float(self.cfg.raw.get("conversation", {}).get("followup_window_s", 7))
         if res.error or self._abort.is_set():

@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from ev.core.config import Config
 from ev.core.log import get_logger
+
+if TYPE_CHECKING:
+    from .capture import SharedMic
 
 log = get_logger("trigger")
 
@@ -55,6 +59,8 @@ class WakeWord:
 
     BLOCK = 1280                      # 80 ms at 16 kHz, the frame size openWakeWord expects
     COOLDOWN_S = 1.0
+    MARK_BACK = 3                     # blocks (about 90 ms) before the moment of detection where the recorder starts listening
+    MARK_TTL_S = 5.0
 
     def __init__(self, cfg: Config, on_wake: Callable[[], None]):
         self.cfg = cfg
@@ -69,6 +75,20 @@ class WakeWord:
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._thread: threading.Thread | None = None
+        # An always-open microphone shared with the recorder (see SharedMic). When set, the wake word listens to it instead of
+        # opening a stream of its own, so the recorder can start from the moment the wake word fired and nothing said in the
+        # same breath ("Evie, open the dashboard") is lost while a new stream opens.
+        self.source: SharedMic | None = None
+        self._mark: tuple[int, float] | None = None
+        self._mark_lock = threading.Lock()
+
+    def take_mark(self) -> int | None:
+        """Where in the shared stream the last wake word fired (once), or None if it did not, or that was a while ago."""
+        with self._mark_lock:
+            mark, self._mark = self._mark, None
+        if mark is None or time.monotonic() - mark[1] > self.MARK_TTL_S:
+            return None
+        return mark[0]
 
     def pause(self) -> None:      # mic is released while EV is listening/speaking
         self._paused.set()
@@ -129,17 +149,16 @@ class WakeWord:
             hit = False
             try:
                 model.reset()
-                with sd.InputStream(samplerate=16000, channels=1, dtype="int16",
-                                    blocksize=self.BLOCK, device=self.device) as s:
-                    while not self._stop.is_set() and not self._paused.is_set():
-                        data, _ = s.read(self.BLOCK)
-                        scores = model.predict(np.asarray(data[:, 0]))
-                        top = max(scores.values(), default=0.0)
-                        if top >= 0.2:
-                            log.debug("wake score %.2f", top)
-                        if top >= self.threshold:
-                            hit = True
-                            break
+                if self.source is not None and self.source.is_open:
+                    hit = self._listen_shared(model)
+                else:
+                    with sd.InputStream(samplerate=16000, channels=1, dtype="int16",
+                                        blocksize=self.BLOCK, device=self.device) as s:
+                        while not self._stop.is_set() and not self._paused.is_set():
+                            data, _ = s.read(self.BLOCK)
+                            if self._score(model, np.asarray(data[:, 0])):
+                                hit = True
+                                break
             except Exception as e:
                 log.warning("wake word mic error: %s; retrying", e)
                 self._stop.wait(2.0)
@@ -147,6 +166,31 @@ class WakeWord:
             if hit:
                 self.pause()                                   # stay paused until the turn is over
                 threading.Thread(target=self._fire, name="wake-turn", daemon=True).start()
+
+    def _score(self, model: Any, chunk: np.ndarray) -> bool:
+        scores = model.predict(chunk)
+        top = max(scores.values(), default=0.0)
+        if top >= 0.2:
+            log.debug("wake score %.2f", top)
+        return bool(top >= self.threshold)
+
+    def _listen_shared(self, model: Any) -> bool:
+        """Listen on the shared microphone; True when the wake word was heard (and the moment is remembered for the recorder)."""
+        assert self.source is not None
+        listener = self.source.blocks(lambda: self._stop.is_set() or self._paused.is_set())
+        buf = np.zeros(0, np.int16)
+        try:
+            for blk in listener:                                 # 30 ms blocks; the model wants 80 ms
+                buf = np.concatenate([buf, blk])
+                while len(buf) >= self.BLOCK:
+                    chunk, buf = buf[: self.BLOCK], buf[self.BLOCK:]
+                    if self._score(model, chunk):
+                        with self._mark_lock:
+                            self._mark = (max(0, listener.resume_from - self.MARK_BACK), time.monotonic())
+                        return True
+        finally:
+            listener.close()
+        return False
 
     def _fire(self) -> None:
         try:

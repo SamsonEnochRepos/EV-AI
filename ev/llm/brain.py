@@ -36,7 +36,8 @@ from ev.skills.store import FORBIDDEN_STEP_TOOLS, Skill, SkillError, SkillStore,
 from ev.tools.base import Tool, ToolRegistry, ToolResult, validate_args
 
 from .client import LLMError, OllamaClient, ToolCall
-from .fastpath import FastMatch, looks_like_question, match_fast, match_smalltalk
+from .fastpath import FastMatch, looks_like_question, match_compound, match_fast, match_smalltalk
+from .selfinfo import SelfInfo, looks_about_self
 from .sentences import SentenceSplitter
 from .spoken import drop_name_opener, spoken_text
 
@@ -46,6 +47,12 @@ log = get_logger("brain")
 _WANTS_DETAIL = re.compile(
     r"\b(in detail|detailed|step by step|walk me through|at length|elaborate|tell me (?:a|the) story|"
     r"tell me (?:more|everything)|explain (?:it |that |this )?(?:fully|properly|more)|longer (?:answer|version))\b", re.I)
+
+# Asking for the bigger, slower model by name. Only these words switch it on: it takes about 6 s to load and 5-7 s to answer here.
+_WANTS_DEEP = re.compile(
+    r"\b(think (?:harder|hard|carefully|properly|this through|it through|that through)|really think|take your time|"
+    r"use (?:the |your )?(?:big|bigger|smarter|deep|better) (?:brain|model))\b", re.I)
+_DEEP_FILLER = "Okay, let me think that through."
 
 _TOOL_JSON =re.compile(r"\{\s*\"name\"\s*:\s*\"(\w+)\"\s*,\s*\"(?:arguments|parameters)\"\s*:\s*(\{.*?\})\s*\}", re.S)
 
@@ -62,12 +69,58 @@ _PLANNER_PROMPT = (
     "data, or a specific real-world fact (a name, date, number, place, person) that a small offline model could get wrong. "
     "Write the query so it makes sense alone: use the earlier conversation to replace words like 'it', 'that' or 'there' with "
     "what they mean. Speech recognition makes mistakes, so drop garbled words that do not fit the topic. Add the word "
-    "'latest' if the question is about something recent.\n"
-    "Reply NONE for chit-chat, opinions, advice, maths, facts that never change, or questions about the user or the assistant.")
+    "'latest' after the topic words when the question is about something recent, but never reply with 'latest' alone.\n"
+    "Reply NONE for chit-chat, opinions, advice, maths, facts that never change, questions about the user or the assistant, "
+    "and requests to do something ('can you do that for me', 'try again', 'go ahead').")
 _PLANNER_TURNS = 2           # earlier user/assistant pairs the planner may see
 _PLANNER_NONE = re.compile(r"^\W*(none|no|n/a)\b", re.I)
+# Words that say "recent" but not what about. A query made only of these ("latest") is the planner failing to find a topic,
+# and searching for it returns random news.
+_NO_TOPIC = frozenset("latest recent current currently new newest today now update updates search find the a an of for "
+                      "about on in it that this".split())
+
+
+def _has_topic(query: str) -> bool:
+    return any(w not in _NO_TOPIC for w in re.findall(r"[a-z0-9']+", query.lower()))
 # Said by the system, never the model, when a slow tool is still running: silence reads as "it didn't hear me".
 _FILLERS = ("One sec.", "Let me check.", "Hang on a sec.", "Checking now.", "Looking into it.")
+
+# ---- "I'll open it" with no tool call. A 3B model often says it will do something and then calls nothing; the user hears a
+# promise that nothing keeps, and the false claim then sits in the history and makes the next turns worse. A sentence that
+# claims an action, in a turn where no tool ran, is not spoken: the model is told once to call the tool, and if it still doesn't,
+# the user hears the truth.
+_DO = (r"open|play|pull up|bring up|switch|click|close|search|launch|start|type|press|scroll|go to|head to|take|set|turn|mute|pause|"
+       r"skip|save|run|navigate|focus|select|load|find|show")
+_ING = (r"opening|playing|pulling up|bringing up|switching|clicking|closing|searching|launching|starting|typing|pressing|scrolling|"
+        r"going to|heading to|taking|setting|turning|muting|pausing|skipping|saving|running|navigating|focusing|selecting|loading|finding")
+_CLAIM_SOON = re.compile(
+    rf"\b(?:i(?:'ll| will|'m going to| am going to|'m gonna)|let me)\s+(?:(?:go ahead and|just|now|also|then)\s+)*(?:{_DO})\b"
+    rf"|\bi(?:'m| am) (?:now |just |already )?(?:{_ING})\b"
+    rf"|^\W*(?:(?:sure|okay|ok|alright|yes|yeah|got it)\W+)*(?:{_ING})\b", re.I)
+# said as already done, or an invented result ("the first video that comes up is..."). Exempt only when the user is asking what
+# happened earlier ("what did you open?"): then it may be an honest recap.
+_CLAIM_DONE = re.compile(
+    r"\bi(?:'ve| have)? (?:just |now )?(?:opened|played|switched|clicked|closed|searched|launched|started|typed|pressed|scrolled|saved|muted|paused|"
+    r"found|navigated|selected|chose|picked)\b"
+    r"|\bit(?:'s| is) (?:now )?(?:open|playing|ready to watch|done)\b|\b(?:that's|that is) (?:done|open|playing)\b|\ball set\b|\bthere you go\b"
+    r"|\bthe (?:first|top|second|third) (?:video|result|link)(?: that)? (?:comes|came|shows|showed|appears|is)\b", re.I)
+_RECAP_Q = re.compile(r"^\W*(?:what|which|why|how|when|did|have|had|do you remember)\b.*\b(?:you|we)\b", re.I)
+_REQUEST_LIKE = re.compile(
+    r"^\W*(?:(?:please|hey|ok|okay|alright|yes|yeah|and|so|now)\W+)*(?:(?:can|could|would|will) you|please|(?:" + _DO + r")\b)|"
+    r"\b(?:go ahead|do (?:that|it)|try (?:that|it|again)|again|not (?:actually )?doing|didn'?t (?:do|open|work|play)|haven'?t|"
+    r"don'?t see|isn'?t (?:open|working|there)|not (?:open|switched|there|working))\b", re.I)
+_NUDGE = ("[system note, not from the user] You said you would do something but called no tool, so nothing happened. If a tool can "
+          "do what the user asked, call it now. If none can, say so plainly in one short sentence. Never say something is done unless a tool did it.")
+_SCREEN_ISH = re.compile(r"\b(?:click|play|video|tab|channel|page|window|scroll|type|press|button|link|result|switch|close|open)\b", re.I)
+_NOT_DONE = "I wasn't able to do that one. Could you put it another way?"
+
+
+def claims_action(sentence: str, user_text: str) -> bool:
+    """True if the sentence promises or reports an action. Used only when no tool has run this turn."""
+    s = sentence.strip()
+    if _CLAIM_SOON.search(s):
+        return True
+    return bool(_CLAIM_DONE.search(s) and not _RECAP_Q.search(user_text.strip()))
 
 
 @dataclass
@@ -88,9 +141,12 @@ class Brain:
                  on_acting: Callable[[bool], None] | None = None,
                  now: Callable[[], dt.datetime] = dt.datetime.now,
                  vault: Vault | None = None, index: VaultIndex | None = None, turn: TurnState | None = None,
-                 context: ContextSnapshot | None = None, skills: SkillStore | None = None):
+                 context: ContextSnapshot | None = None, skills: SkillStore | None = None,
+                 selfinfo: SelfInfo | None = None):
         self.cfg = cfg
         self.context = context
+        self.selfinfo = selfinfo
+        self.page_load_s = float(cfg.get("screen", "page_load_s", 3.5))   # wait between "open the site" and "click the first video"
         self.skills = skills
         self.action_log: list[dict[str, Any]] = []         # successful calls, newest last: what "save that as ..." turns into a skill
         self._skill_running = False
@@ -122,9 +178,13 @@ class Brain:
         self.max_sentences_detail = int(llm.get("reply_max_sentences_detail", 6))
         self.direct_replies = bool(llm.get("direct_tool_replies", False))
         self.filler_after_s = float(llm.get("filler_after_s", 1.3))
-        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather", "read_screen", "screenshot_describe"]))
+        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather", "read_screen", "screenshot_describe", "look_at_camera"]))
         self.rewarm_after_s = float(llm.get("rewarm_after_s", 90))
         self.lookup_planner = bool(llm.get("lookup_planner", True))
+        self.deep_model = str(llm.get("deep_model", "") or "")      # "" = no bigger model; used only when the user asks for it
+        self.deep_num_predict = int(llm.get("deep_num_predict", 220))
+        self.deep_keep_alive = str(llm.get("deep_keep_alive", "2m"))
+        self._deep_ok: bool | None = None
         self.first_chunk_min = int(cfg.get("tts", "first_chunk_min_chars", 12))
         self.clause_chars = int(cfg.get("tts", "first_clause_chars", 0))
         self.background_summary = True         # evals and tests that need the summary at once call update_summary() themselves
@@ -184,6 +244,10 @@ class Brain:
                     self.turn.untrusted_seen = True        # a window title or file name came from outside: a saved fact needs a yes
         if recalled := self._auto_recall(user_text):
             parts.append(recalled)
+        if self.selfinfo is not None and looks_about_self(user_text):
+            # System-made text from the config (not a window title or a web page), so it needs no untrusted wrapper
+            parts.append("True facts about yourself, for answering a question about you (say only what was asked, in plain words, "
+                         "never guess):\n" + self.selfinfo.block())
         return "\n\n".join(parts)
 
     def _auto_recall(self, user_text: str) -> str:
@@ -261,6 +325,29 @@ class Brain:
         self._remember_turn(text, out.text)
         return out
 
+    def _screen_fallback_ok(self, user_text: str) -> bool:
+        return ("do_on_screen" in self.registry.names() and not _RECAP_Q.search(user_text) and len(user_text.split()) >= 3
+                and bool(_SCREEN_ISH.search(user_text)))
+
+    def _run_compound(self, text: str, steps: list[FastMatch], filler: Callable[[], None] | None = None) -> TurnResult:
+        """"Open Spotify and turn the volume down": every clause is its own call through the gate, in order. The small model
+        used to answer these with one action and a promise of the rest."""
+        t0 = time.perf_counter()
+        log_: list[dict[str, Any]] = []
+        for fm in steps:
+            if fm.tool not in self.registry.names():
+                log_.append({"tool": fm.tool, "args": fm.args, "ok": False, "message": "I can't do that one."})
+                continue
+            if fm.tool == "do_on_screen" and log_ and log_[-1].get("ok") and log_[-1]["tool"] in ("open_website", "open_app"):
+                time.sleep(self.page_load_s)                 # the page has to be up before the screen agent looks at it
+            log_.append(self._execute(fm.tool, fm.args, filler, source=SOURCE_FAST))
+        said = " ".join(t for r in log_ if (t := spoken_text(str(r.get("message", "")))))
+        out = TurnResult(said, log_, fast_path=True)
+        out.timings["total"] = time.perf_counter() - t0
+        log.info("compound request: %s", ", ".join(f"{r['tool']}={'ok' if r.get('ok') else 'failed'}" for r in log_))
+        self._remember_turn(text, said)
+        return out
+
     def _plan_lookup(self, text: str) -> str | None:
         """A web search query for a question that needs one, or None. The small chat model rarely decides to call web_search
         itself and answers from memory instead, so a separate tool-less call decides and also writes the query: a follow-up
@@ -278,7 +365,7 @@ class Brain:
             return None
         lines = reply.text.strip().splitlines()
         line = re.sub(r"^(?:search )?query\s*:\s*", "", lines[0].strip(), flags=re.I).strip(" \"'`") if lines else ""
-        if not line or _PLANNER_NONE.match(line) or self._names_a_tool(line):
+        if not line or _PLANNER_NONE.match(line) or self._names_a_tool(line) or not _has_topic(line):
             return None
         log.info("lookup planner: %r -> search %r", text, line[:120])
         return line[:120]
@@ -308,7 +395,17 @@ class Brain:
             on_sentence(self.rng.choice(_FILLERS))
 
         self.turn.begin_turn(user_text)
-        forced = (self._match_skill(user_text) or match_fast(user_text)) if allow_fast else None   # matched once: it serves the fast path and the forced call
+        skill = self._match_skill(user_text) if allow_fast else None
+        if allow_fast and skill is None and (steps := match_compound(user_text)):
+            done = self._run_compound(user_text, steps, filler)
+            on_sentence(done.text)
+            return done
+        forced = (skill or match_fast(user_text)) if allow_fast else None   # matched once: it serves the fast path and the forced call
+        if forced and forced.tool == "look_at_camera" and forced.tool not in self.registry.names():
+            off = "The camera is turned off in my settings, so I can't look."          # don't let the model guess what it "sees"
+            self._remember_turn(user_text, off)
+            on_sentence(off)
+            return TurnResult(off, fast_path=True)
         if forced and forced.tool == "review_facts":
             reviewed = self._review_facts(user_text, filler)
             on_sentence(reviewed.text)
@@ -339,16 +436,25 @@ class Brain:
                              "tool_calls": [{"function": {"name": forced.tool, "arguments": r["args"]}}]})
             messages.append({"role": "tool", "tool_name": forced.tool, "content": r["model_view"]})
         first_token: float | None = None
-        limit = self.max_sentences_detail if _WANTS_DETAIL.search(user_text) else self.max_sentences
+        deep = bool(self.deep_model and _WANTS_DEEP.search(user_text) and self._deep_available())
+        limit = self.max_sentences_detail if deep or _WANTS_DETAIL.search(user_text) else self.max_sentences
+        chat_kw: dict[str, Any] = (
+            {"model": self.deep_model, "options": {"num_predict": self.deep_num_predict}, "keep_alive": self.deep_keep_alive}
+            if deep else {})
+        if deep:
+            log.info("thinking harder with %s", self.deep_model)
+            on_sentence(_DEEP_FILLER)                  # system text, like the other fillers: the bigger model needs a few seconds
         capped = False
+        nudged = False
         try:
             for step in range(self.max_steps + 1):
+                claimed = False
                 splitter = SentenceSplitter(self.first_chunk_min, self.clause_chars)
                 text_parts: list[str] = []
                 calls: list[ToolCall] = []
                 use_tools = schemas if step < self.max_steps else None
                 # closing() ends the HTTP stream the moment we stop reading, so Ollama stops generating too
-                with contextlib.closing(self.client.chat_stream(messages, tools=use_tools)) as chunks:
+                with contextlib.closing(self.client.chat_stream(messages, tools=use_tools, **chat_kw)) as chunks:
                     for ch in chunks:
                         if should_stop():
                             break
@@ -359,12 +465,15 @@ class Brain:
                             # Only stream speech if this turn is not turning into a tool call.
                             if not calls and not _looks_like_tool_json("".join(text_parts)):
                                 for s, whole in splitter.feed_ex(ch.text):
+                                    if claimed or (not result.tool_log and claims_action(s, user_text)):
+                                        claimed = True                  # "I'll open it": not spoken unless a tool call follows
+                                        continue                        # (the tool call, if any, comes after the text in the stream)
                                     if sentences < limit and (s := spoken_text(s)) and not self._names_a_tool(s):
                                         s = drop_name_opener(s) if not spoken else s
                                         spoken.append(s)
                                         sentences += whole
                                         on_sentence(s)
-                                if sentences >= limit:
+                                if sentences >= limit and not claimed:
                                     capped = True          # enough said; stop generating the rest
                                     break
                         calls += ch.tool_calls
@@ -376,8 +485,28 @@ class Brain:
                     calls = _extract_json_calls(full)
                     if calls:
                         full = ""
+                tail = [] if calls or capped or claimed else splitter.flush()          # the last sentence, which had no full stop
+                if tail and not result.tool_log and any(claims_action(t, user_text) for t in tail):
+                    claimed = True
+                if not calls and claimed:
+                    if not nudged and step < self.max_steps:
+                        nudged = True
+                        log.info("claimed an action without a tool call (%r); asking the model to call the tool", full[:100])
+                        messages += [{"role": "assistant", "content": full}, {"role": "user", "content": _NUDGE}]
+                        continue
+                    log.warning("still no tool call after the nudge (%r)", full[:100])
+                    msg = _NOT_DONE
+                    if self._screen_fallback_ok(user_text):
+                        # The model understood this as something to do on screen but won't call a tool: the screen agent can
+                        # (it is gated like any call, and bounded).
+                        r = self._execute("do_on_screen", {"goal": user_text[:300]}, filler, source=SOURCE_FAST)
+                        result.tool_log.append(r)
+                        msg = spoken_text(str(r.get("message", ""))) or _NOT_DONE
+                    spoken.append(msg)
+                    on_sentence(msg)
+                    break
                 if not calls:
-                    for s in ([] if capped else splitter.flush()):
+                    for s in tail:
                         if (s := spoken_text(s)) and not self._names_a_tool(s):
                             s = drop_name_opener(s) if not spoken else s
                             spoken.append(s)
@@ -423,9 +552,22 @@ class Brain:
         result.text = text
         result.timings["first_token"] = first_token or 0.0
         result.timings["total"] = time.perf_counter() - t_start
-        if not result.error:
+        if not result.error and not (result.interrupted and not text and not result.tool_log):
+            # (a request cut off before EV said or did anything is not history: the app joins it to what the user says next)
             self._remember_turn(user_text, text, result.tool_log)
         return result
+
+    def _deep_available(self) -> bool:
+        """True when the bigger model is installed (asked once, then remembered)."""
+        if self._deep_ok is None:
+            try:
+                names = self.client.available_models()
+                self._deep_ok = self.deep_model in names or f"{self.deep_model}:latest" in names
+            except LLMError:
+                return False                           # Ollama didn't answer: ask again next time
+            if not self._deep_ok:
+                log.warning("llm.deep_model %r is not installed (ollama pull %s); \"think harder\" is ignored", self.deep_model, self.deep_model)
+        return self._deep_ok
 
     def _speakable_as_is(self, entries: list[dict[str, Any]], model_text: str) -> bool:
         return (self.direct_replies and bool(entries) and not model_text.strip()

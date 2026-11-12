@@ -53,7 +53,7 @@ class OCR:
         exact = [i for i in items if i.text.lower() == n]
         if exact:
             return exact[0]
-        part = [i for i in items if n in i.text.lower()]
+        part = [i for i in items if n in i.text.lower() and len(i.text) <= max(48, 4 * len(n))]   # a control, not a paragraph that mentions it
         return min(part, key=lambda i: len(i.text)) if part else None
 
     @staticmethod

@@ -34,7 +34,8 @@ log = get_logger("dashboard")
 
 STATIC = Path(__file__).parent / "static"
 FILES = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-         "/app.css": ("app.css", "text/css; charset=utf-8"), "/orb.js": ("orb.js", "text/javascript; charset=utf-8")}
+         "/app.css": ("app.css", "text/css; charset=utf-8"), "/orb.js": ("orb.js", "text/javascript; charset=utf-8"),
+         "/face.js": ("face.js", "text/javascript; charset=utf-8")}
 REPLAY = ("state", "turn", "tool", "proactive")      # what a page that has just connected is caught up on (never audio levels)
 MAX_BODY = 64 * 1024
 TOKEN_TTL_S = 120

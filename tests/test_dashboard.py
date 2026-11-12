@@ -653,18 +653,19 @@ def test_open_dashboard_is_voice_only_and_handled_without_the_model(cfg):
 
 def test_the_page_puts_text_in_as_text_and_has_no_inline_script_or_style():
     static = ROOT / "ev" / "dashboard" / "static"
-    for name in ("app.js", "orb.js"):
+    for name in ("app.js", "orb.js", "face.js"):
         js = (static / name).read_text(encoding="utf-8")
         for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "srcdoc", "javascript:"):
             assert bad not in js, (name, bad)
         assert " style=" not in js and ".setAttribute(\"style\"" not in js, name
-        if name == "orb.js":                                             # the orb only draws on a canvas: no network, no markup
+        if name in ("orb.js", "face.js"):                                # visual canvas modules: no network, no markup
             assert not any(w in js for w in ("fetch(", "XMLHttpRequest", "EventSource", "WebSocket", "createElement")), name
     html = (static / "index.html").read_text(encoding="utf-8")
     assert "<script>" not in html and " style=" not in html and "onclick=" not in html and "http://" not in html and "https://" not in html
     css = (static / "app.css").read_text(encoding="utf-8")
     assert "@import" not in css and "url(http" not in css and "https://" not in css and "http://" not in css     # no outside fonts, images or sheets
     assert 'src="/orb.js"' in html and "/orb.js" in FILES
+    assert 'src="/face.js"' in html and "/face.js" in FILES
 
 
 def test_the_real_app_serves_the_dashboard_and_open_dashboard_hands_out_a_working_link(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ from ev.audio.playback import Player
 from ev.core.config import load_config
 from ev.core.events import State
 from ev.llm.client import OllamaClient
+from ev.stt.whisper import Transcript
 from ev.tools.base import Tool, ToolResult
 from ev.tts.speaker import Speaker
 
@@ -55,7 +56,8 @@ def app(tmp_path, monkeypatch):
     cfg = load_config(overrides={"general": {"data_dir": str(tmp_path / "data"), "log_dir": str(tmp_path / "logs")},
                                  "vault": {"path": str(tmp_path / "vault")},        # never the real Documents folder
                                  "overlay": {"enabled": False}, "tray": {"enabled": False},
-                                 "conversation": {"followup_enabled": False, "voice_interrupt": False}})   # fake mic always "hears" speech
+                                 "conversation": {"followup_enabled": False, "voice_interrupt": False,    # fake mic always "hears" speech
+                                                  "continuous_mic": False}})            # tests that want the shared stream turn it on and fake it
     a = EVApp(cfg)
     a.overlay.enabled = False
     from ev.audio.vad import EnergyVAD
@@ -64,7 +66,7 @@ def app(tmp_path, monkeypatch):
     a.sink_audio = []
     a.speaker = Speaker(a.engine, Player(sink=lambda seg, sr: (a.sink_audio.append(len(seg)), time.sleep(0.005))))
     monkeypatch.setattr("ev.app.mic_blocks", lambda cfg, stop: speech_blocks())
-    a.stt.transcribe = lambda audio: type("T", (), {"text": a.heard, "rtf": 0.1})()   # type: ignore[method-assign]
+    a.stt.transcribe = lambda audio: Transcript(a.heard, 0.1, 2.0)   # type: ignore[method-assign]
     a.heard = "what time is it"
     a.states = []
     a.bus.subscribe("state", lambda old, new: a.states.append(new))
@@ -276,7 +278,7 @@ def test_followup_turn_without_retrigger(app, monkeypatch):
     app.cfg.raw["conversation"]["followup_window_s"] = 1
     opened = _mic_script(monkeypatch, ["speech", "speech", "silence"])
     heard = iter(["what time is it", "what's the date today"])
-    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    app.stt.transcribe = lambda audio: Transcript(next(heard), 0.1, 2.0)   # type: ignore[method-assign]
     app.on_trigger()
     assert opened == ["speech", "speech", "silence"]       # turn 1, follow-up turn, then the window times out
     assert len(app.engine.said) == 2
@@ -330,7 +332,7 @@ def test_talking_over_ev_stops_speech_and_listens(app, monkeypatch):
     monkeypatch.setattr("ev.app.InterruptMonitor", lambda *a: monitors.append(FakeMonitor(*a)) or monitors[-1])
     opened = _mic_script(monkeypatch, ["speech", "speech", "silence"])
     heard = iter(["tell me a story", "actually never mind the story, what time is it"])
-    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    app.stt.transcribe = lambda audio: Transcript(next(heard), 0.1, 2.0)   # type: ignore[method-assign]
     use_fake_llm(app, FakeOllama([text_reply("Once upon a time there was a fox. " * 8, parts=24)]))
     app.on_trigger()
     assert monitors and monitors[0].stopped                    # the mic was released before re-recording
@@ -417,7 +419,7 @@ def test_hesitation_sounds_in_a_followup_are_not_a_request(app, monkeypatch):
     app.cfg.raw["conversation"]["followup_enabled"] = True
     _mic_script(monkeypatch, ["speech", "speech", "silence"])
     heard = iter(["what time is it", "hmm"])
-    app.stt.transcribe = lambda audio: type("T", (), {"text": next(heard), "rtf": 0.1})()   # type: ignore[method-assign]
+    app.stt.transcribe = lambda audio: Transcript(next(heard), 0.1, 2.0)   # type: ignore[method-assign]
     use_fake_llm(app, FakeOllama([text_reply("should never be asked")]))
     app.on_trigger()
     assert len(app.engine.said) == 1                         # only the time answer; "hmm" never reached the model
@@ -448,7 +450,10 @@ class FakeSharedMic:
     def close(self):
         self.is_open, self.closed = False, self.closed + 1
 
-    def blocks(self, stop):
+    def mark(self, back=0):
+        return 0
+
+    def blocks(self, stop, since=None):
         self.subscriptions += 1
         return speech_blocks()
 
@@ -465,11 +470,12 @@ def test_continuous_mic_opens_once_per_conversation_and_closes_before_idle(app, 
     assert app.sm.state is State.IDLE
 
 
-def test_continuous_mic_is_off_by_default(app, monkeypatch):
+def test_continuous_mic_off_means_one_stream_per_turn(app, monkeypatch):
     FakeSharedMic.instances = []
     monkeypatch.setattr("ev.app.SharedMic", FakeSharedMic)
-    app.on_trigger()
-    assert FakeSharedMic.instances == []                   # default config keeps one stream per turn
+    app.on_trigger()                                       # the fixture turns it off
+    assert FakeSharedMic.instances == []
+    assert load_config().raw["conversation"]["continuous_mic"] is True      # the shipped default is on (D33): nothing lost at a hand-off
 
 
 def test_continuous_mic_failure_falls_back_to_per_turn_streams(app, monkeypatch):
@@ -481,3 +487,198 @@ def test_continuous_mic_failure_falls_back_to_per_turn_streams(app, monkeypatch)
     app.cfg.raw["conversation"]["continuous_mic"] = True
     app.on_trigger()                                       # the patched per-turn mic still works
     assert app.engine.said and app._mic is None
+
+
+# ---- listening while EV thinks: speaking again before EV answers cancels the turn and joins it to the next utterance
+class OnceMonitor:
+    """Fires 'the user spoke' the moment it starts, but only the first one created; later monitors stay silent."""
+    created = 0
+
+    def __init__(self, cfg, vad, out_level, on_interrupt, blocks):
+        type(self).created += 1
+        self.fire = type(self).created == 1
+        self.on_interrupt = on_interrupt
+
+    def start(self):
+        if self.fire:
+            self.on_interrupt([np.ones(480, np.int16)] * 3)
+
+    def stop(self): ...
+
+
+def _thinking_app(app, monkeypatch, kinds, window=1):
+    OnceMonitor.created = 0
+    app.cfg.raw["conversation"].update(voice_interrupt=True, listen_while_thinking=True, followup_window_s=window)
+    app.brain.lookup_planner = False
+    monkeypatch.setattr("ev.app.InterruptMonitor", OnceMonitor)
+    return _mic_script(monkeypatch, kinds)
+
+
+def test_speaking_again_before_ev_answers_joins_the_two_halves(app, monkeypatch):
+    opened = _thinking_app(app, monkeypatch, ["speech", "speech"])
+    heard = iter(["what's the capital of", "Australia"])
+    app.stt.transcribe = lambda audio: Transcript(next(heard), 0.1, 2.0)        # type: ignore[method-assign]
+    use_fake_llm(app, FakeOllama([text_reply("Cut off."), text_reply("Canberra.")]))
+    app.on_trigger()
+    users = [m["content"] for m in app.brain.history if m["role"] == "user"]
+    assert users == ["what's the capital of Australia"]                          # one request, not two fragments
+    assert "Canberra." in app.engine.said and "Cut off." not in app.engine.said
+    assert opened == ["speech", "speech"] and app._held == ""
+
+
+def test_if_nothing_more_is_said_the_held_request_is_still_answered(app, monkeypatch):
+    opened = _thinking_app(app, monkeypatch, ["speech", "silence"])
+    heard = iter(["what's the capital of France"])
+    app.stt.transcribe = lambda audio: Transcript(next(heard), 0.1, 2.0)        # type: ignore[method-assign]
+    use_fake_llm(app, FakeOllama([text_reply("Cut off."), text_reply("Paris.")]))
+    app.on_trigger()                                                              # a cough, not a sentence
+    assert "Paris." in app.engine.said
+    assert [m["content"] for m in app.brain.history if m["role"] == "user"] == ["what's the capital of France"]
+    assert opened == ["speech", "silence"]
+
+
+def test_a_request_that_already_ran_a_tool_is_never_held_or_repeated(app, monkeypatch):
+    _thinking_app(app, monkeypatch, ["speech", "silence"])
+    app.heard = "what time is it"                                                 # fast path: the tool runs at once
+    app.on_trigger()
+    assert app._held == ""                                                        # nothing to merge into later
+
+
+def test_listen_while_thinking_is_off_by_default(app, monkeypatch):
+    started = []
+    monkeypatch.setattr("ev.app.InterruptMonitor", lambda *a: started.append(1))
+    app.cfg.raw["conversation"]["voice_interrupt"] = True
+    app.heard = "how are you doing today"
+    use_fake_llm(app, FakeOllama([text_reply("Fine.")]))
+    app.on_trigger()
+    assert started == [1]                                                         # only the one that starts with speech, as before
+
+
+# ---- "think harder": the bigger model, only when asked
+def _models_of(fake):
+    return [r.get("model") for r in fake.requests if "messages" in r]
+
+
+def test_think_harder_uses_the_bigger_model_and_says_so(app):
+    app.brain.deep_model = "qwen2.5:7b"
+    app.brain.lookup_planner = False
+    app.heard = "think harder about whether I should learn Rust or Go"
+    fake = FakeOllama([text_reply("Go is gentler for a Python person. Rust pays off later.")])
+    fake.models.append("qwen2.5:7b")
+    use_fake_llm(app, fake)
+    app.on_trigger()
+    assert _models_of(fake) == ["qwen2.5:7b"]
+    assert app.engine.said[0] == "Okay, let me think that through."
+    assert fake.requests[0]["options"]["num_predict"] == app.brain.deep_num_predict
+    assert app.client.is_cold(90)                       # the main model was pushed out: it reloads while the user speaks next
+
+
+def test_ordinary_questions_and_missing_model_stay_on_the_main_model(app):
+    app.brain.deep_model = "qwen2.5:7b"
+    app.brain.lookup_planner = False
+    fake = FakeOllama([text_reply("Go is gentler.")])
+    use_fake_llm(app, fake)
+    app.heard = "should I learn Rust or Go first"
+    app.on_trigger()
+    app.heard = "think harder about it"                 # asked, but the model isn't installed (the fake lists only two)
+    app.on_trigger()
+    assert set(_models_of(fake)) == {app.client.model}
+    assert "Okay, let me think that through." not in app.engine.said
+
+
+# ---- speech capture: nothing lost at a hand-off, a pause is not the end of a sentence (D33)
+class HandoffMic:
+    is_open = True
+
+    def __init__(self):
+        self.since_args = []
+
+    def mark(self, back=0):
+        return 7
+
+    def blocks(self, stop, since=None):
+        self.since_args.append(since)
+        return speech_blocks()
+
+    def close(self): ...
+
+
+def test_an_unfinished_sentence_is_waited_for_and_joined(app):
+    app.cfg.raw["conversation"].update(finish_rounds=2, finish_window_s=1)
+    app._mic = HandoffMic()
+    said = iter(["what time is", "what time is it"])
+    lengths = []
+    app.stt.transcribe = lambda audio: (lengths.append(len(audio)), Transcript(next(said), 0.1, 2.0))[1]   # type: ignore[method-assign]
+    app.on_trigger()
+    assert len(lengths) == 2 and lengths[1] > lengths[0]                  # the second decode holds both parts
+    assert any("AM" in s or "PM" in s for s in app.engine.said)           # and the joined sentence is what was answered
+
+
+def test_a_finished_sentence_is_not_made_to_wait(app):
+    app._mic = HandoffMic()
+    calls = []
+    app.stt.transcribe = lambda audio: (calls.append(1), Transcript("what time is it", 0.1, 2.0))[1]   # type: ignore[method-assign]
+    app.on_trigger()
+    assert len(calls) == 1
+
+
+def test_the_recording_starts_from_the_moment_the_wake_word_fired(app):
+    mic = app._mic = HandoffMic()
+    app.wake._mark = (7, time.monotonic())
+    app.on_trigger()
+    assert mic.since_args[0] == 7
+
+
+def test_after_a_barge_in_the_recorder_resumes_exactly_where_the_monitor_stopped(app):
+    mic = app._mic = HandoffMic()
+    app._on_talk_over([np.ones(480, np.int16)], 99)
+    app.on_trigger()
+    assert mic.since_args[0] == 99
+
+
+def test_talking_over_ev_is_checked_for_its_name_unless_that_is_turned_off(app, monkeypatch):
+    made = []
+
+    class Spy:
+        def __init__(self, *a):
+            made.append(self)
+            self.verify = None
+
+        def start(self): ...
+
+    monkeypatch.setattr("ev.app.InterruptMonitor", Spy)
+    app.cfg.raw["conversation"]["voice_interrupt"] = True
+    assert app._start_monitor() is made[0] and made[0].verify == app._addressed_to_ev
+    app.cfg.raw["conversation"]["interrupt_needs_name"] = False
+    app._start_monitor()
+    assert made[1].verify is None
+
+
+def test_the_name_check_reads_what_was_said_and_fails_closed(app):
+    app._name_score = lambda blocks: 0.0                                             # type: ignore[method-assign]
+    app.stt.transcribe = lambda audio: Transcript("Evie, don't open it", 0.1, 2.0)    # type: ignore[method-assign]
+    assert app._addressed_to_ev([np.ones(480, np.int16)])
+    app.stt.transcribe = lambda audio: Transcript("so then I told him", 0.1, 2.0)     # type: ignore[method-assign]
+    assert not app._addressed_to_ev([np.ones(480, np.int16)])
+
+    def boom(audio):
+        raise RuntimeError("no model")
+
+    app.stt.transcribe = boom                                                        # type: ignore[method-assign]
+    assert not app._addressed_to_ev([np.ones(480, np.int16)])                         # nothing can interrupt without a way to check
+
+
+@pytest.mark.parametrize("said,score,addressed", [
+    ("Eveled.", 0.0, True),                   # what Whisper wrote for "Evie" in the real log
+    ("Eevee, stop", 0.0, True),
+    ("Evvy wait", 0.0, True),
+    ("so then I told him", 0.9, True),         # the speech model missed it; the wake-word model heard the name
+    ("so then I told him", 0.1, False),
+    ("every time I try it", 1.0, False),       # sounds like the name, is an ordinary word
+    ("even if it works", 1.0, False),
+    ("the TV is loud", 0.0, False),
+])
+def test_a_misheard_name_still_counts_but_ordinary_words_do_not(app, said, score, addressed):
+    app.stt.transcribe = lambda audio: Transcript(said, 0.1, 2.0)                    # type: ignore[method-assign]
+    app._name_score = lambda blocks: score                                           # type: ignore[method-assign]
+    assert app._addressed_to_ev([np.ones(480, np.int16)]) is addressed

@@ -87,6 +87,21 @@ class OllamaClient:
         options: dict[str, Any] | None = None,
         keep_alive: str | None = None,
     ) -> Generator[ChatChunk, None, None]:
+        swapped = model is not None and model != self.model
+        try:
+            yield from self._chat_stream(messages, tools, model, options, keep_alive)
+        finally:
+            if swapped:
+                self._last_used = 0.0        # another model took the GPU: is_cold() is true, so the main one reloads while the user talks
+
+    def _chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        options: dict[str, Any] | None,
+        keep_alive: str | None,
+    ) -> Generator[ChatChunk, None, None]:
         self._last_used = time.monotonic()
         body: dict[str, Any] = {
             "model": model or self.model,

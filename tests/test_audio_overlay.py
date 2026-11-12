@@ -36,7 +36,8 @@ def test_recorder_endpoints_speech(cfg):
     rec = Recorder(cfg, EnergyVAD(), on_level=levels.append)
     out = rec.record(blocks(silence(500), tone(1200), silence(1500)))
     assert out is not None
-    assert 1.2 <= len(out) / SR <= 2.4
+    a = cfg["audio"]                                   # the speech, the silence that ends it, and the pre-roll kept before it
+    assert 1.2 <= len(out) / SR <= 1.2 + (a["silence_ms_to_end"] + a["pre_roll_ms"]) / 1000 + 0.1
     assert max(levels) > 0.3
 
 

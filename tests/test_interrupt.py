@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ev.audio.interrupt import EchoDetector
@@ -88,3 +89,38 @@ def test_the_users_voice_is_not_learned_as_echo():
     first = feed_all(det, rows, user=(3.0, 0.12))
     assert first is not None
     assert det._run >= det.need                          # still seeing it as an interruption, not as echo
+
+
+# ---- quiet_fires: the mic is also open while EV thinks (conversation.listen_while_thinking)
+def quiet_detector(**kw) -> EchoDetector:
+    c = load_config().raw["conversation"]
+    return EchoDetector(block_ms=30, min_ms=c["interrupt_min_ms"], margin=c["interrupt_margin"], floor=c["interrupt_floor"], **kw)
+
+
+def test_speech_while_ev_is_silent_fires_only_when_asked():
+    talking = [(0.06, True, 0.0)] * 15                    # 0.45 s of a person talking, EV making no sound
+    on, off = quiet_detector(quiet_fires=True), quiet_detector()
+    assert any([on.feed(*row) for row in talking])
+    assert not any([off.feed(*row) for row in talking])                     # off: unchanged behaviour
+
+
+def test_quiet_mode_ignores_noise_the_vad_does_not_call_speech():
+    det = quiet_detector(quiet_fires=True)
+    assert not any([det.feed(0.06, False, 0.0) for _ in range(60)])
+    det = quiet_detector(quiet_fires=True)
+    assert not any([det.feed(0.005, True, 0.0) for _ in range(60)])         # below the floor
+
+
+@pytest.mark.parametrize("run", RUNS)
+def test_quiet_mode_still_never_mistakes_ev_s_own_echo_for_the_user(run):
+    assert feed_all(quiet_detector(quiet_fires=True), RUNS[run]) is None
+
+
+def test_quiet_mode_waits_out_the_echo_after_ev_stops():
+    delay, gain = 16, 0.075                               # blocks the sound takes to reach the mic; mic rms per unit of playback
+    env = np.convolve(np.random.default_rng(3).uniform(0.2, 1.0, 100), np.ones(3) / 3, "same")      # speech-like, not periodic
+    out = [0.4 * float(e) for e in env[:90]] + [0.0] * 40
+    rows = [(gain * out[n - delay] if n >= delay else 0.0, True, out[n]) for n in range(len(out))]
+    det = quiet_detector(quiet_fires=True)
+    assert [det.feed(*row) for row in rows].count(True) == 0   # EV talking, then its echo dying away: nobody interrupted
+    assert 14 <= det.lag <= 18

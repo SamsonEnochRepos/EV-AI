@@ -20,6 +20,12 @@ def _pag():  # noqa: ANN202
     return pyautogui
 
 
+def _clicked(label: str) -> str:
+    """What was clicked, as a short spoken line. A match that is a whole line of text (a paragraph, a log line) is not a name to read out."""
+    label = " ".join(label.split())
+    return f"Clicked {label}." if 0 < len(label) <= 40 else "Clicked it."
+
+
 def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate: SafetyGate) -> None:
     from ev.screen import capture, uia
     from ev.screen.ocr import OCR
@@ -51,7 +57,7 @@ def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate:
                 if d.verdict is Verdict.BLOCK:
                     return ToolResult(False, "That control looks sensitive, so I won't click it.")
                 _pag().click(*el.center)
-                return ToolResult(True, f"Clicked {el.name}.", {"layer": "uia"})
+                return ToolResult(True, _clicked(el.name), {"layer": "uia"})
         # layer 2: OCR
         d = policy.check_sensitive_target(title, name)
         if d.verdict is Verdict.BLOCK:
@@ -63,7 +69,7 @@ def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate:
         scale_x = _pag().size()[0] / img.size[0]
         cx, cy = hit.center
         _pag().click(int(cx * scale_x), int(cy * scale_x))
-        return ToolResult(True, f"Clicked {hit.text}.", {"layer": "ocr"})
+        return ToolResult(True, _clicked(hit.text), {"layer": "ocr"})
 
     def type_text(text: str) -> ToolResult:
         if _killed():

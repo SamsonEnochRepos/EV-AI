@@ -1,8 +1,8 @@
 """The island: a frameless, always-on-top, click-through "dynamic island" at the top of the screen that never takes focus.
 
-At rest it is a small black pill with two eyes that follow the mouse pointer. It opens (with a little spring) while EV listens
-or talks, flanking the eyes with level bars, and half-opens while it thinks. In display mode the same body grows downward to hold
-the conversation text. PySide6 implementation; the animation maths lives in anim.py.
+A small black pill with a row of level bars: it springs open while EV listens or talks and the bars follow the voice, and it
+half-opens with a slow wave while EV thinks. It fades away when EV is idle (overlay.idle_visible turns the resting pill on). In
+display mode the same body grows downward to hold the conversation text. PySide6 implementation; the animation maths lives in anim.py.
 """
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import threading
 import time
 from typing import Any
 
-from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QObject, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ev.core.config import Config
@@ -24,9 +24,10 @@ from . import protocol
 from .anim import (
     VISIBLE_STATES,
     BarAnimator,
-    Eyes,
     IslandSizes,
     Spring,
+    alert_target,
+    approach,
     body_origin,
     clamp,
     corner_radius,
@@ -45,7 +46,7 @@ WS_EX_TOOLWINDOW = 0x80
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_LAYERED = 0x80000
 MARGIN = 12                 # transparent room around the body, for the glow and the spring's overshoot
-TEXT_TOP = 4                # gap between the eyes' strip and the text
+TEXT_TOP = 4                # gap between the bar strip and the text
 TEXT_BOTTOM = 14
 TEXT_SIDE = 16
 PARA_GAP = 6
@@ -101,15 +102,14 @@ class Pill(QWidget):
         self.horizontal = o["anchor"].partition("-")[2] or "center"
         self.vertical = o["anchor"].partition("-")[0] or "top"
         self.keep_visible = bool(o.get("idle_visible", True))
-        self.follow_cursor = bool(o.get("follow_cursor", True))
         self._user_txt = self._ev_txt = ""
         self._card_h = 0
         self.anim = BarAnimator(o["bar_count"])
-        self.eyes = Eyes()
+        self.alert = 0.0                     # 0 = bar colour, 1 = accent colour (working on the screen, or an error)
         self.fill = QColor(o["fill"])
         self.fill.setAlpha(o["fill_alpha"])
         self.border = QColor(o["border"])
-        self.eye_rgb = _rgb(QColor(o.get("eye_color", "#ffffff")))
+        self.bar_rgb = _rgb(QColor(o.get("bar_color", "#ffffff")))
         self.accent = QColor(o.get("accent", "#ff2d3f"))
         self.state = "idle"
         self.level = 0.0
@@ -126,8 +126,6 @@ class Pill(QWidget):
         self.resize(self.win_w, self.win_h)
         self.spring_w = Spring(self.w_)
         self.spring_h = Spring(self.h_)
-        self._cursor_at = QPointF(0, 0)
-        self._cursor_moved = time.monotonic()
         self._sig: tuple[Any, ...] = ()
         self.timer = QTimer(self)
         self.timer.setInterval(IDLE_MS)
@@ -219,7 +217,7 @@ class Pill(QWidget):
         return QFontMetrics(self.font_).boundingRect(QRect(0, 0, width, 100000), flags, text).height()
 
     def _relayout(self) -> None:
-        """Fit the text under the eyes. The window never resizes; the body springs to the new height."""
+        """Fit the text under the bar strip. The window never resizes; the body springs to the new height."""
         cards = self.display or self._notice
         user, ev, card_h = "", "", 0
         if cards and not self.convo.empty:
@@ -241,8 +239,6 @@ class Pill(QWidget):
         if s == self.state:
             return
         now = time.monotonic()
-        if self.state == "speaking" and s == "idle":
-            self.eyes.cheer(now)                         # a small smile when EV has finished
         self.state = s
         self.anim.state = s
         self.state_since = now
@@ -272,20 +268,6 @@ class Pill(QWidget):
         self._kick()
 
     # ---- frame
-    def _cursor_offset(self, now: float) -> tuple[tuple[float, float] | None, float, bool]:
-        """(pointer offset from the island's centre, seconds the pointer has been still, is the pointer over the island)."""
-        pos = QCursor.pos()
-        here = QPointF(pos.x(), pos.y())
-        if (here - self._cursor_at).manhattanLength() > 1.5:
-            self._cursor_at = here
-            self._cursor_moved = now
-        r = self.body_rect()
-        c = self.mapToGlobal(QPointF(r.center().x(), r.center().y()).toPoint())
-        local = self.mapFromGlobal(pos)
-        hover = r.adjusted(-8, -8, 8, 8).contains(local.x(), local.y())
-        off = (here.x() - c.x(), here.y() - c.y()) if self.follow_cursor else None
-        return off, now - self._cursor_moved, hover and self.state == "idle"
-
     def tick(self) -> None:
         now = time.monotonic()
         dt = min(0.1, now - self.last)
@@ -316,11 +298,9 @@ class Pill(QWidget):
         tw, th = self.target_shape()
         self.spring_w.step(tw, dt)
         self.spring_h.step(th, dt)
-        off, still_s, hover = self._cursor_offset(now)
-        self.eyes.step(dt, now - self.t0, self.state, off, self.level, hover, still_s)
+        self.alert = approach(self.alert, alert_target(self.state), dt, 8.0)
         self.anim.step(now - self.t0, self.level)
-        sig = (round(self.cur_w, 1), round(self.cur_h, 1), round(self.eyes.gx, 3), round(self.eyes.gy, 3), round(self.eyes.lid, 2),
-               round(self.eyes.squint, 2), round(self.eyes.scale, 2), round(self.eyes.alert, 2), round(self.opacity, 2),
+        sig = (round(self.cur_w, 1), round(self.cur_h, 1), round(self.alert, 2), round(self.opacity, 2),
                tuple(round(b, 2) for b in self.anim.h), self._user_txt, self._ev_txt, self.state)
         if sig != self._sig:
             self._sig = sig
@@ -347,10 +327,9 @@ class Pill(QWidget):
         tw, th = self.target_shape()
         self.spring_w.x, self.spring_h.x = tw, th
         self.spring_w.v = self.spring_h.v = 0.0
+        self.alert = alert_target(state)
         for i in range(steps):
-            self.eyes.step(1 / 30, i / 30, state, None, level)
             self.anim.step(i / 30, level)
-        self.eyes.blink = 0.0                           # a still frame should not catch a blink
 
     # ---- painting
     def paintEvent(self, _e: Any) -> None:
@@ -358,14 +337,13 @@ class Pill(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = self.body_rect()
         s = self.sizes
-        e = self.eyes
         radius = corner_radius(rect.width(), rect.height(), s)
         grow = expansion(rect.width(), s)
-        if e.alert > 0.02:                                    # a soft ring of the accent colour: EV is working on the screen
+        if self.alert > 0.02:                                    # a soft ring of the accent colour: EV is working on the screen
             pulse = 0.65 + 0.35 * (0.5 + 0.5 * math.sin((time.monotonic() - self.t0) * 5.0))
             for i, a in enumerate((70, 38, 16)):
                 glow = QColor(self.accent)
-                glow.setAlphaF(clamp(a / 255 * e.alert * pulse))
+                glow.setAlphaF(clamp(a / 255 * self.alert * pulse))
                 pen = QPen(glow)
                 pen.setWidthF(2.0)
                 p.setPen(pen)
@@ -374,7 +352,7 @@ class Pill(QWidget):
                 p.drawRoundedRect(g, radius + (i + 1) * 2.2, radius + (i + 1) * 2.2)
         body = QPainterPath()
         body.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-        edge = QColor(*lerp_color(_rgb(self.border), _rgb(self.accent), e.alert * 0.8))
+        edge = QColor(*lerp_color(_rgb(self.border), _rgb(self.accent), self.alert * 0.8))
         pen = QPen(edge)
         pen.setWidthF(1.0)
         p.setPen(pen)
@@ -384,69 +362,30 @@ class Pill(QWidget):
         strip = min(rect.height(), s.strip_h) if self._card_h else rect.height()
         cy = rect.top() + strip / 2
         dim = 0.45 if self.state in ("paused", "muted") else 1.0
-        eye_rgb = lerp_color(self.eye_rgb, _rgb(self.accent), e.alert)
-        self._paint_bars(p, rect, cy, strip, grow, eye_rgb, dim)
-        self._paint_eyes(p, rect, cy, grow, eye_rgb, dim)
+        self._paint_bars(p, rect, cy, strip, grow, lerp_color(self.bar_rgb, _rgb(self.accent), self.alert), dim)
         if self._card_h:
             self._paint_text(p, rect)
         p.end()
 
-    def _paint_eyes(self, p: QPainter, rect: QRectF, cy: float, grow: float, rgb: tuple[int, int, int], dim: float) -> None:
-        e = self.eyes
-        half_gap = 11.0 + 3.0 * grow
-        ew, eh = 9.5 * e.scale, 12.0 * e.scale
-        reach_x, reach_y = 6.0 + 8.0 * grow, 3.5
-        cx0 = rect.center().x()
-        round_c = QColor(*rgb)
-        round_c.setAlphaF(clamp((1.0 - e.squint) * dim))
-        arc_c = QColor(*rgb)
-        arc_c.setAlphaF(clamp(e.squint * dim))
-        for side in (-1, 1):
-            x = cx0 + side * half_gap + e.gx * reach_x
-            y = cy + e.gy * reach_y
-            if round_c.alphaF() > 0.01:
-                h = max(2.2, eh * e.lid)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(round_c)
-                p.drawEllipse(QRectF(x - ew / 2, y - h / 2, ew, h))
-            if arc_c.alphaF() > 0.01:
-                path = QPainterPath()
-                path.moveTo(x - 5.2, y + 2.6)
-                path.quadTo(x, y - 5.4, x + 5.2, y + 2.6)
-                pen = QPen(arc_c)
-                pen.setWidthF(2.8)
-                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                p.setPen(pen)
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawPath(path)
-
     def _paint_bars(self, p: QPainter, rect: QRectF, cy: float, strip: float, grow: float, rgb: tuple[int, int, int], dim: float) -> None:
-        """Level bars either side of the eyes; they fade in as the island opens and are tallest next to the eyes."""
+        """One row of level bars, centred in the strip; they fade in as the island opens and are tallest in the middle."""
         if grow < 0.05:
             return
         hs = self.anim.h
         n = len(hs)
-        k = n // 2
-        if k < 1:
-            return
-        bw, gap = 3.0, 3.0
+        bw, gap = 3.5, 3.0
         max_h = max(6.0, strip - 14)
         col = QColor(*rgb)
         col.setAlphaF(clamp(grow * dim))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(col)
-        cx0 = rect.center().x()
-        inner = 11.0 + 3.0 * grow + 5.0 + 12.0        # half eye gap + eye + breathing room
-        for j in range(k):
-            bh = max(bw, hs[k - 1 - j] * max_h)
-            xl = cx0 - inner - j * (bw + gap) - bw
-            p.drawRoundedRect(QRectF(xl, cy - bh / 2, bw, bh), bw / 2, bw / 2)
-            bh = max(bw, hs[n - k + j] * max_h)
-            xr = cx0 + inner + j * (bw + gap)
-            p.drawRoundedRect(QRectF(xr, cy - bh / 2, bw, bh), bw / 2, bw / 2)
+        x0 = rect.center().x() - (n * bw + (n - 1) * gap) / 2
+        for i, h in enumerate(hs):
+            bh = max(bw, h * max_h)
+            p.drawRoundedRect(QRectF(x0 + i * (bw + gap), cy - bh / 2, bw, bh), bw / 2, bw / 2)
 
     def _paint_text(self, p: QPainter, rect: QRectF) -> None:
-        shown = clamp((rect.height() - self.sizes.strip_h - 6) / 30)       # text fades in as the body opens under the eyes
+        shown = clamp((rect.height() - self.sizes.strip_h - 6) / 30)       # text fades in as the body opens under the bars
         if shown <= 0.01:
             return
         p.setFont(self.font_)

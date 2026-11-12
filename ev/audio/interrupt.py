@@ -42,8 +42,13 @@ class EchoDetector:
     DEFAULT_LAG = 16          # ~480 ms until the first estimate
     MIN_GAIN_SAMPLES = 12
 
+    QUIET_EXTRA = 8           # blocks of silence from EV (beyond the echo delay) before the room counts as quiet
+
     def __init__(self, block_ms: float = 30, min_ms: float = 300, margin: float = 2.0, floor: float = 0.015,
-                 arm_ms: float = 1200, gain_quantile: float = 75):
+                 arm_ms: float = 1200, gain_quantile: float = 75, quiet_fires: bool = False):
+        # quiet_fires: while EV itself has made no sound for longer than the echo takes to arrive (it is still thinking, or
+        # between replies) there is no echo to model, so plain speech above the floor counts as the user talking.
+        self.quiet_fires = quiet_fires
         self.need = max(1, math.ceil(min_ms / block_ms))
         self.margin = margin
         self.floor = floor
@@ -79,6 +84,10 @@ class EchoDetector:
                 best, best_c = lag, c
         self.lag = best
 
+    def rearm(self) -> None:
+        """Forget the speech that just fired (it was not for EV), so the next interruption needs a fresh run of speech."""
+        self._run = 0
+
     def feed(self, in_rms: float, speech: bool, out_level: float) -> bool:
         self._out.append(out_level)
         self._in.append(in_rms)
@@ -88,8 +97,11 @@ class EchoDetector:
         if self._played >= 30 and self._since_est >= 10:
             self._since_est = 0
             self._estimate_lag()
+        if self.quiet_fires and max(list(self._out)[-(self.lag + self.QUIET_EXTRA):]) <= self.OUT_MIN:
+            self._run = self._run + 1 if (speech and in_rms > self.floor) else 0
+            return self._run >= self.need
         out_d = self._out[-1 - self.lag] if len(self._out) > self.lag else 0.0     # playback as the mic hears it now
-        gain = float(np.percentile(self._gains, self.gain_q)) if len(self._gains) >= self.MIN_GAIN_SAMPLES else None
+        gain =float(np.percentile(self._gains, self.gain_q)) if len(self._gains) >= self.MIN_GAIN_SAMPLES else None
         self.ratio = gain
         if self._played < self.arm_blocks or gain is None:
             if out_d > self.GAIN_MIN_OUT:
@@ -104,9 +116,14 @@ class EchoDetector:
 
 
 class InterruptMonitor:
-    """Background mic listener that runs while EV speaks. Calls on_interrupt(recent_blocks) at most once."""
+    """Background mic listener that runs while EV speaks. Calls on_interrupt(recent_blocks) at most once.
+
+    With `verify` set (conversation.interrupt_needs_name), hearing someone talk is not enough: the start of what they say is
+    collected and handed to verify(), which says whether it was addressed to EV ("EV, don't open it..."). Anything else (a
+    side conversation, the TV, a murmur) is ignored and EV carries on."""
 
     PREROLL_BLOCKS = 20       # ~600 ms handed to the recorder so the start of the user's sentence isn't lost
+    SETTLE_MS = 400           # this much silence ends the collected speech early
 
     def __init__(self, cfg: Config, vad: Any, out_level: Callable[[], float],
                  on_interrupt: Callable[[list[np.ndarray]], None],
@@ -114,12 +131,16 @@ class InterruptMonitor:
         conv = cfg.raw.get("conversation", {})
         self.detector = EchoDetector(
             block_ms=float(cfg["audio"]["block_ms"]), min_ms=float(conv.get("interrupt_min_ms", 300)),
-            margin=float(conv.get("interrupt_margin", 2.0)), floor=float(conv.get("interrupt_floor", 0.015)))
+            margin=float(conv.get("interrupt_margin", 2.0)), floor=float(conv.get("interrupt_floor", 0.015)),
+            quiet_fires=bool(conv.get("listen_while_thinking", False)))
         self.cfg = cfg
         self.vad = vad
         self.out_level = out_level
         self.on_interrupt = on_interrupt
         self._blocks = blocks
+        self.verify: Callable[[list[np.ndarray]], bool] | None = None
+        self.listen_blocks = max(1, math.ceil(float(conv.get("interrupt_listen_s", 1.4)) * 1000 / float(cfg["audio"]["block_ms"])))
+        self.settle_blocks = max(1, math.ceil(self.SETTLE_MS / float(cfg["audio"]["block_ms"])))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -133,6 +154,16 @@ class InterruptMonitor:
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(2.0)
 
+    def _collect(self, gen: Any, heard: list[np.ndarray]) -> list[np.ndarray]:
+        """The start of what the user is saying: up to listen_s of it, or until they pause."""
+        silent = 0
+        for blk in gen:
+            heard.append(blk)
+            silent = 0 if self.vad.is_speech(blk) else silent + 1
+            if silent >= self.settle_blocks or len(heard) >= self.listen_blocks + self.PREROLL_BLOCKS:
+                break
+        return heard
+
     def _run(self) -> None:
         ring: deque[np.ndarray] = deque(maxlen=self.PREROLL_BLOCKS)
         if hasattr(self.vad, "reset"):
@@ -142,9 +173,20 @@ class InterruptMonitor:
             for blk in gen:
                 ring.append(blk)
                 if self.detector.feed(rms(blk), self.vad.is_speech(blk), self.out_level()):
+                    heard = list(ring)
+                    if self.verify is not None:
+                        heard = self._collect(gen, heard)
+                        if not self.verify(heard):
+                            self.detector.rearm()                 # not for EV: keep talking, keep listening
+                            ring.clear()
+                            continue
                     log.info("user talked over EV (echo gain %.2f, delay %d ms)", self.detector.ratio or 0.0, self.detector.lag_ms)
                     self._stop.set()
-                    self.on_interrupt(list(ring))
+                    resume = getattr(gen, "resume_from", None)       # where on a shared microphone the recorder picks up
+                    if resume is None:
+                        self.on_interrupt(heard)
+                    else:
+                        self.on_interrupt(heard, resume)             # type: ignore[call-arg]
                     return
         except Exception as e:                       # no mic, device unplugged: EV just can't be interrupted by voice
             log.warning("voice interruption unavailable: %s", e)

@@ -100,6 +100,14 @@ Per model turn EV puts a few lines about the computer beside the request. Everyt
 * **Types:** only `open_extensions` (images, pdf, txt/md/csv, Office documents, mp3/wav/mp4). `.exe`, `.bat`, `.cmd`, `.lnk`, `.ps1`, `.vbs`, `.js`, `.html`, `.msi`, `.dll` and anything without an extension are refused. The last extension decides (`photo.png.exe` is refused).
 * **"Open it":** `which = "last"` carries no path for policy to judge, so the tool re-checks the file it resolved from `kv.last_artifact` against the same rules before opening it (the D7 pattern: re-check what you actually act on). `last_artifact` is written only by EV's own code after it creates a screenshot or note, never from model, screen or web text.
 
+## The camera (D31)
+`look_at_camera` is the one tool that sees the user's surroundings, so it is built to be hard to trigger by accident:
+* **Voice only.** It is not in the model's tool list (`llm_visible = false`) and a model-made call is refused. It runs only when the user's own words match a camera phrase in `fastpath.py` ("what am I holding", "can you see me"). Text on a web page, a screen or a note cannot ask for it.
+* **One frame, then closed.** The camera is open for about two seconds (its light is on for that long), one frame is read, the device is released. Nothing runs between requests and there is no presence check.
+* **Not stored, not sent.** The frame stays in memory, goes only to the local vision model on `127.0.0.1`, and is dropped. It is never written to disk (not even under `privacy.debug_save_screenshots`, which covers the screen only).
+* **What it sees is untrusted.** The description is wrapped as data (`source="camera"`) and scanned for instruction-like text, because a held-up sign or a screen in view can say anything.
+* **Off switch.** `[camera] enabled = false` in `config/ev.toml`. It is a file-only setting; the dashboard's allow-list does not include it.
+
 ## Latency features and the gate (D21)
 * **Parallel tool batches** only cover side-effect-free tools, and every call in the batch is validated and gated one at a time, on the calling thread, *before* any of them runs. A denied call never runs; the model is told which one was denied.
 * **Direct tool replies** (off by default) speak a tool's own result line. They are never used for `untrusted` results (web, screen, files), which always go back to the model wrapped as data.

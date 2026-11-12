@@ -74,7 +74,7 @@ _OFF_V = r"(?:deactivate|disable|turn off|switch off|stop|hide|exit|leave|end|cl
 
 # Whisper keeps the "Yeah, so" / "okay, um" in front of a request, so a few leading fillers don't stop a match.
 _PRE = (r"^\s*(?:(?:yeah|yes|yep|okay|ok|so|well|um|uh|and|now|alright|all right)[, ]+){0,2}"
-        r"(?:(?:hey |ok(?:ay)? )?ev[, ]+)?(?:please |can you |could you |would you )?")
+        r"(?:(?:hey |oh |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?:please |can you |could you |would you )?")
 _POST = r"[\s.!?]*(?:please)?[\s.!?]*$"
 
 # "remember that my dog's name is Biscuit": matched on the transcript as spoken (case kept), and the value is the user's own
@@ -87,7 +87,7 @@ _REMEMBER_LEADING = re.compile(_PRE + r"(?:keep in mind|bear in mind|don'?t forg
 # "my dog's name is Biscuit, remember that" / "I'm allergic to peanuts, keep that in mind": the comma is what separates a
 # request from "I will remember that" or "do you remember that".
 _REMEMBER_TRAILING = re.compile(
-    r"^\s*(?:(?:hey |ok(?:ay)? )?ev[, ]+)?(?P<s>.{6,200}?)[,.]\s+(?:please\s+)?"
+    r"^\s*(?:(?:hey |oh |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?P<s>.{6,200}?)[,.]\s+(?:please\s+)?"
     r"(?:remember (?:that|this|it)|keep (?:that|this|it) in mind|don'?t forget (?:that|it)|do not forget (?:that|it))" + _POST, re.I)
 _NOT_A_FACT = re.compile(r"(?:to|i will|i'll|i can|i do|i did|you|we|do you|did you|can you|could you|would you|will you|should)\b", re.I)
 _MY_X_IS_Y = re.compile(r"^my\s+(?P<k>[a-z0-9' -]{2,40}?)\s+(?:is|are|was|were)\s+(?P<v>.+)$", re.I)
@@ -170,7 +170,7 @@ def _close_command(t: str) -> FastMatch | None:
     name = m["n"].strip()
     if re.fullmatch(_THIS, name):
         name = "this"
-    elif re.match(r"(tabs?|this tab|that tab|the tab|browser|everything|all|up|out|down|in|off|on|a |an )\b|tabs?$", name):
+    elif re.match(r"(tabs?|this tab|that tab|the tab|browser|everything|all|up|out|down|in|off|on|a |an )\b|tabs?$", name) or re.search(r"\btabs?$", name):
         return None                      # tabs and vague targets go to the model, which can pick the right tool
     args: dict[str, Any] = {"name": name}
     if m["f"] or m["v"] == "kill":
@@ -298,6 +298,97 @@ def _skill_command(t: str) -> FastMatch | None:
     return None
 
 
+# ---- the screen and the camera. A 3B model rarely picks click_element or a camera look by itself, so the clear phrasings are
+# routed here in code. Every match still goes through the SafetyGate like any other call (sensitive windows, risky clicks
+# and key combos are decided there from the arguments, not from anything said here).
+_CTRL_WORD = r"(?:button|link|icon|tab|option|menu item|menu|checkbox|field|box|toggle|switch)"
+_TARGET_WORD = r"[a-z0-9][a-z0-9 '&./+-]{0,60}?"
+_NOT_A_TARGET = frozenset("it that this there here one something anything them him her".split())
+_KEY_NAMES = {"control": "ctrl", "ctrl": "ctrl", "alt": "alt", "shift": "shift", "windows": "win", "win": "win", "enter": "enter",
+              "return": "enter", "escape": "esc", "esc": "esc", "tab": "tab", "space": "space", "spacebar": "space",
+              "delete": "delete", "backspace": "backspace", "up": "up", "down": "down", "left": "left", "right": "right",
+              "home": "home", "end": "end", "pageup": "pageup", "pagedown": "pagedown"}
+_AMOUNT = {"lot": 10, "bit": 2, "little": 2, "way": 10}
+
+# "open notepad and type hello", "click the search box and type cats": more than one step, so the screen agent plans it
+_MULTI_STEP = re.compile(
+    _PRE + r"(?:open|launch|start|click|press|focus|switch to|select|scroll)\b.{2,120}?\s+(?:and|then|and then)\s+"
+    r"(?:type|write|click|press|tap|scroll|select|fill|submit|send|save)\b.{1,150}" + _POST, re.I)
+
+_CAM_PLACE = r"(?:through|on|in|using|with|via|from) (?:the |my |your )?(?:camera|webcam|cam)"
+_CAMERA = re.compile(
+    _PRE + r"(?:what (?:am i|i am|i'm) (?:holding|wearing|showing(?: you)?|pointing at)"
+    r"|what(?:'s| is| are) (?:that|this|these|those|it)(?: thing| object| item)?(?: that)? (?:i'm|i am) (?:holding|showing(?: you)?|pointing at)"
+    r"|what(?:'s| is) (?:this|that|it) in my hands?|what(?:'s| is| do i have) in my hands?"
+    r"|(?:can|could|do) you see me|(?:look|have a look|take a look) at me|(?:how|what) do i look"
+    r"|(?:look|see) (?:at )?what i(?:'m| am) (?:holding|showing)|i(?:'m| am) (?:showing|holding up) (?:you )?(?:something|this|a|an|my)"
+    rf"|(?:look|see|show|tell|describe|what).{{0,40}}{_CAM_PLACE})(?:\b.{{0,60}})?" + _POST, re.I)
+
+
+def _key_combo(spoken: str) -> str | None:
+    """"control s" / "ctrl plus shift t" / "enter" -> "ctrl+s" / "ctrl+shift+t" / "enter"; None if any word is not a key."""
+    s = re.sub(r"\b(?:the|key|keys|button|then)\b", " ", spoken.lower().replace("+", " "))
+    s = re.sub(r"\bplus\b", " ", s)
+    s = re.sub(r"\bpage (up|down)\b", r"page\1", s)
+    keys: list[str] = []
+    for w in s.split():
+        k = _KEY_NAMES.get(w) or (w if re.fullmatch(r"[a-z0-9]|f(?:[1-9]|1[0-2])", w) else None)
+        if k is None:
+            return None
+        keys.append(k)
+    if not keys or len(keys) > 4 or (len(keys) == 1 and len(keys[0]) == 1):
+        return None                      # "press a" is more likely a misheard word than a command
+    return "+".join(keys)
+
+
+def _target(raw: str) -> str | None:
+    """The control to click from "the camera button" -> "camera"; None for "it", "that" and other pointers."""
+    name = re.sub(r"^(?:(?:on|the|that|this|my)\s+)+", "", raw.strip(" .,!?"))
+    name = re.sub(r"\s+(?:for me|please|now|right now|there|here)$", "", name)
+    name = re.sub(rf"(?:\s+{_CTRL_WORD})+$", "", name).strip(" .,!?")
+    return None if not name or name in _NOT_A_TARGET or len(name.split()) > 6 else name
+
+
+def _camera_command(orig: str, t: str) -> FastMatch | None:
+    if _CAMERA.search(t):
+        return FastMatch("look_at_camera", {"question": orig[:200]}, "camera", then_llm=True)
+    return None
+
+
+def _screen_command(orig: str, t: str) -> FastMatch | None:
+    """Clicking, typing, keys, scrolling and switching windows said plainly, and multi-step tasks handed to the screen agent."""
+    if _MULTI_STEP.search(t):
+        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_task")
+    if re.search(_PRE + r"(?:open|go to|switch to|close|click(?: on)?)\s+(?:the |my )?(?:[a-z0-9 .+-]{2,30}? )?(?:tab|channel|playlist|page)(?: for me)?" + _POST, t) and not re.search(
+            r"\b(?:browser|window|app)s?\b|^(?:\W*(?:hey |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?:please )?(?:can you |could you )?close (?:the |this |that )?tab\W*$", t):
+        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_page")      # "open the YouTube channel", "close the Edge tab": things on a page
+    m = re.search(_PRE + r"(?:play|watch|open|click(?: on)?|select|start)\s+(?:the\s+)?(?:(?P<o>first|second|third|top|1st|2nd|3rd|latest|newest|last)\s+)?"
+                  r"(?:video|result|link|song|track|channel)(?P<by>\s+(?:by|from|called|named|titled|about|which says|that says|saying|with the title)\s+.{2,100}?)?" + _POST, t)
+    if m and (m["o"] or m["by"]):         # "play the video by X", "open the first result": a pick on a page, so the screen agent does it
+        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_pick")
+    m = re.search(_PRE + r"(?:press|hit|push|tap)\s+(?P<k>[a-z0-9 +]{1,40}?)" + _POST, t)
+    if m and (combo := _key_combo(m["k"])):
+        return FastMatch("press_keys", {"combo": combo}, "keys")
+    m = re.search(_PRE + rf"(?:double[ -])?click(?: on)?\s+(?P<n>{_TARGET_WORD})" + _POST, t)
+    if m is None:
+        m = re.search(_PRE + rf"(?:tap|press|hit|push|select|choose)(?: on)?\s+(?:the |that |my )?(?P<n>{_TARGET_WORD})\s+{_CTRL_WORD}" + _POST, t)
+    if m and (name := _target(m["n"])):
+        return FastMatch("click_element", {"name": name}, "click")
+    m = re.search(_PRE + r"scroll(?: the)?(?: page| window| screen)?\s*(?P<d>up|down)(?: (?:a )?(?P<q>bit|little|lot|way)(?: (?:more|further))?)?"
+                  r"(?: (?P<n>\d+|one|two|three|four|five) times?)?" + _POST, t)
+    if m:
+        n = _num(m["n"]) if m["n"] else None
+        return FastMatch("scroll", {"direction": m["d"], "amount": int(n) if n else _AMOUNT.get(m["q"] or "", 3)}, "scroll")
+    m = re.search(_PRE + r"type(?: out)?\s+(?P<x>.{1,200}?)" + _POST, orig, re.I)
+    if m and not re.match(r"(?:of|in|into|on|at|to|up|out|a|an|the|my|your|something|anything)\b", m["x"], re.I):
+        return FastMatch("type_text", {"text": m["x"].strip()}, "type")
+    m = (re.search(_PRE + r"(?:switch to|focus(?: on)?)\s+(?:the |my )?(?P<n>[a-z0-9][a-z0-9 .+-]{1,40}?)(?: window| app| browser)?" + _POST, t)
+         or re.search(_PRE + r"bring\s+(?:the |my )?(?P<n>[a-z0-9][a-z0-9 .+-]{1,40}?)(?: window| app)? to (?:the )?front" + _POST, t))
+    if m and not re.search(r"\b(?:mode|theme|tab|next|previous|another|off|on)\b", m["n"]):
+        return FastMatch("focus_window", {"title": m["n"].strip()}, "focus")
+    return None
+
+
 def match_fast(text: str) -> FastMatch | None:
     orig = re.sub(r"\s+", " ", text.strip())
     t = orig.lower()
@@ -351,6 +442,12 @@ def match_fast(text: str) -> FastMatch | None:
     sk = _skill_command(t)
     if sk:
         return sk
+    cam = _camera_command(orig, t)
+    if cam:
+        return cam
+    scr = _screen_command(orig, t)
+    if scr:
+        return scr
     # "quiet for an hour": stop EV speaking up on its own (proactive lines) for a while; "you can talk again" ends it
     m = re.search(_PRE + r"(?:be quiet|stay quiet|go quiet|keep quiet|quiet|stop (?:interrupting|bothering) me|don'?t (?:interrupt|bother) me"
                   r"|snooze(?: the)?(?: proactive| notifications?| alerts?)?)(?: for)?(?: the next)?\s+" + _NUM + r"\s*" + _UNIT + _POST, t)
@@ -380,11 +477,20 @@ def match_fast(text: str) -> FastMatch | None:
 
     m = re.search(
         _PRE + r"(?:what(?:'s| is) (?:on|in) (?:my |the )?(?:screen|display|monitor)"
-        r"|(?:see|look at|read|check|describe) (?:my |the )?(?:screen|display)"
-        r"|what am i (?:looking at|seeing)|what do you see(?: on (?:my |the )?screen)?|read (?:this|the) (?:page|window))"
-        r"(?: right now| now| for me)?" + _POST, t)
+        r"|(?:see|look at|read|check|describe|scan|have a look at|take a look at) (?:my |the |this )?(?:screen|display|monitor)"
+        r"|what am i (?:looking at|seeing)(?: on (?:my |the )?(?:screen|display|monitor))?"
+        r"|what do you see(?: on (?:my |the )?(?:screen|display|monitor))?"
+        r"|(?:read|summari[sz]e|explain)(?: me)? (?:this|the|that) (?:page|window|article|screen|tab|email|message)"
+        r"|what (?:does|is) (?:this|that|it) (?:page|window|tab|email|message)? ?say)"
+        r"(?: right now| now| for me| on (?:my |the )?(?:screen|display|monitor))?"
+        r"(?:\s+and\s+(?:tell|show|explain|read)(?: it| that| this)?(?: to)? me(?: what(?:'s| is| are)?(?: on it| there| happening| going on| in it)?)?)?"
+        + _POST, t)
     if m:
         return FastMatch("read_screen", {}, "screen", then_llm=True)
+    m = re.search(_PRE + r"(?:describe|explain|what(?:'s| is)|look at|tell me about)(?: me)? (?:this|that|the) "
+                  r"(?:image|picture|photo|chart|graph|diagram|meme|logo|icon|video|design)(?: on (?:my |the )?(?:screen|display))?" + _POST, t)
+    if m:                                                    # a picture needs the vision model: text reading can't describe it
+        return FastMatch("screenshot_describe", {"question": orig[:200]}, "screen_visual", then_llm=True)
 
     # the file EV last made: "open it", "open the screenshot you just took", "show me the last note"
     if re.search(
@@ -440,7 +546,92 @@ def match_fast(text: str) -> FastMatch | None:
     if m:
         return FastMatch("take_note", {"text": m.group(1)}, "note")
 
+    return match_self(t)
+
+
+# ---- "Evie stop": a stop word alone (with or without the name) silences EV; it is never sent to the model. The speech model
+# often writes "Evie stop" as "Evie store" / "Evie stock", so after the name those count too.
+_NAME_W = r"(?:evie|ev|eevee|evy|eve|evi)"
+_STOP = re.compile(
+    r"^\W*(?:(?:hey|ok|okay|please)\W+)?(?:" + _NAME_W + r"\W+)?(?:(?:please)\W+)?"
+    r"(?:stop(?: it| that| talking| speaking| please)?|be quiet|quiet|shut up|hush|enough|that'?s enough|cancel(?: that)?|"
+    r"never ?mind|forget it)\W*$|"
+    r"^\W*(?:hey\W+)?" + _NAME_W + r"\W+(?:store|stock|stoop|stahp|stopped|stuff)\W*$", re.I)
+
+
+def is_stop(text: str) -> bool:
+    return bool(_STOP.match(text))
+
+
+# "...search for X and play the first video": the search is one step and the pick is another (the screen agent, once the page is up)
+_PICK_TAIL = re.compile(
+    r"\s*(?:,\s*)?(?:and\s+then|and|then)\s+((?:play|watch|open|click(?: on)?|select|start)\s+(?:on\s+)?(?:the\s+)?"
+    r"(?:first|top|second|third|1st|2nd|3rd|latest|newest)\s+(?:video|result|link|one)(?:\s+(?:that|which)\s+(?:comes|shows|appears|pops)\s+(?:up|out))?)"
+    r"\W*$", re.I)
+
+
+# ---- questions about EV itself ("what text to speech model do you use?"): answered from the live config, never by the 3B model
+_YOU = r"\b(?:you|your|you're|yourself|evie|ev|we|our)\b"
+_SELF_TOPICS: list[tuple[str, str]] = [
+    ("tts", r"text[- ]?to[- ]?speech|\btts\b|voice (?:model|engine)|speech synth\w*|(?:what|which) (?:\w+ ){0,2}voice\b|how do you (?:speak|talk)"),
+    ("stt", r"speech[- ]?to[- ]?text|\b(?:stt|std)\b|speech recogni\w+|transcri\w+|whisper|how do you (?:hear|listen|understand (?:me|what i say))"),
+    ("wake", r"wake ?words?|hotword|how do you (?:know|hear) (?:when|that) i(?:'m| am)? (?:call|talk|say)\w*"),
+    ("vision", r"\bocr\b|vision model|(?:screen|camera) (?:model|reading)|how do you (?:see|read) (?:the |my )?(?:screen|display)"),
+    ("memory", r"how (?:does|do) (?:your )?memory work|where do you (?:store|keep|save) (?:my |your )?(?:memor\w+|notes|facts)|how do you remember"),
+    ("safety", r"how (?:do|are) you (?:stay |keep )?(?:safe|secure|protected)|what stops you from"),
+    ("llm", r"(?:llm|language model|ai model|chat model|\bmodel\b|\bbrain\b)|what (?:ai|llm) are you|powering you|powers you"),
+    ("overview", r"tell me about yourself|introduce yourself|describe yourself|what are you made of|what(?:'s| is) under the hood"),
+    ("build", r"how (?:were|are|was) (?:you|it) (?:built|made|created|developed|programmed|coded|designed)|(?:built|made|created|written|coded) (?:with|in|using|on|from)"
+              r"|tech(?:nology|nologies| stack)|programming language|what (?:are you|do you) (?:run|running|work) (?:on|with)|who (?:made|built|created|developed|wrote) you"),
+]
+_SELF_TOPIC_RES = [(topic, re.compile(rx)) for topic, rx in _SELF_TOPICS]
+
+
+def match_self(t: str) -> FastMatch | None:
+    """A plain question about EV's own models, voice, hearing or build. The second-person word keeps "what is a language model?"
+    (a general question) out; the topic words pick the answer. Matched last, so it can't shadow a command."""
+    if not re.search(_YOU, t) or not re.search(r"\b(?:what|which|how|who|tell|describe|explain|introduce|are|do|does|is|where)\b", t):
+        return None
+    for topic, rx in _SELF_TOPIC_RES:
+        if rx.search(t):
+            return FastMatch("about_self", {"topic": topic}, "about_self")
     return None
+
+
+# ---- several things in one breath ("open Spotify and turn the volume down"): each clause is matched on its own and they run
+# in order. Only tools that are plain commands qualify: nothing that carries free text (a note, a reminder, typing), nothing that
+# needs the model afterwards (a search), and nothing that clicks or types on a screen (that is the screen agent's job).
+_COMPOUND_OK = frozenset({"open_app", "open_website", "close_app", "set_volume", "media_control", "set_timer", "take_screenshot",
+                          "get_time_date", "list_reminders", "open_dashboard", "set_display_mode"})
+_SPLIT = re.compile(r"\s*(?:,\s*)?(?:\b(?:and then|and also|and|then|also|after that|plus)\b|,)\s+")
+_LEAD_VERB = re.compile(_PRE + r"(?P<v>open|launch|start|close|quit)\b")
+
+
+def match_compound(text: str) -> list[FastMatch] | None:
+    t = re.sub(r"\s+", " ", text.strip().lower())
+    t = re.sub(r"[.?!]+\s+(?=[a-z])", ", ", t)
+    if pick := _PICK_TAIL.search(t):
+        head = match_fast(t[: pick.start()])
+        if head and head.tool == "open_website" and head.args.get("query"):
+            goal = f"{pick.group(1).strip()} (on the page that just opened)"
+            return [head, FastMatch("do_on_screen", {"goal": goal[:300]}, "pick_after_search")]
+    if _MULTI_STEP.search(t):
+        return None                                     # "open notepad and type hello" waits for the window: the screen agent's job
+    parts = [p.strip(" .,!?") for p in _SPLIT.split(t) if p and p.strip(" .,!?")]
+    if not 2 <= len(parts) <= 3:
+        return None
+    out: list[FastMatch] = []
+    verb = ""
+    for i, part in enumerate(parts):
+        fm = match_fast(part)
+        if fm is None and verb:
+            fm = match_fast(f"{verb} {part}")           # "open notepad and calculator": the verb carries over
+        if fm is None or fm.then_llm or fm.tool not in _COMPOUND_OK:
+            return None
+        if i == 0 and (lv := _LEAD_VERB.match(part)):
+            verb = lv["v"]
+        out.append(fm)
+    return out
 
 
 # Question-shaped speech: the only turns worth a planner call (ev/llm/brain.py::_plan_lookup). Deliberately loose; the
@@ -453,5 +644,12 @@ _QUESTION = re.compile(
 _ABOUT_EV = re.compile(r"\b(?:how are you|how'?s it going|what'?s up|who are you|what can you do|your name|are you (?:there|ok|okay|real))\b", re.I)
 
 
+# "Can you do that for me?", "try that again", "go ahead": a request to act on the last turn. Nothing to look up, and the
+# planner used to turn these into a search for "latest".
+_DO_THAT = re.compile(r"\b(?:(?:do|try|redo|repeat|finish|handle|fix|continue|retry)\s+(?:that|this|it)\b|try again|go ahead|"
+                      r"(?:do|try) (?:that|this|it) (?:again|for me))", re.I)
+
+
 def looks_like_question(text: str) -> bool:
-    return len(text.split()) >= 4 and bool(_QUESTION.search(text)) and not _ABOUT_EV.search(text)
+    return (len(text.split()) >= 4 and bool(_QUESTION.search(text)) and not _ABOUT_EV.search(text)
+            and not _DO_THAT.search(text))

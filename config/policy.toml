@@ -14,6 +14,7 @@ close_app = "safe"            # polite close only; force=true escalates to confi
 open_website = "safe"         # public https sites only; unfamiliar links that carry a query string escalate to confirm
 take_screenshot = "safe"
 open_file = "safe"            # only files in [files] open_dirs, only the types in open_extensions; the tool re-checks the file it resolves itself
+about_self = "safe"           # voice only (not in the model's tool list): reads EV's own settings aloud (model, voice, hearing); touches nothing
 set_display_mode = "safe"     # toggles the on-screen text card; touches nothing but EV's own overlay
 set_timer = "safe"
 set_reminder = "safe"
@@ -23,6 +24,7 @@ web_search = "safe"
 get_weather = "safe"
 read_screen = "safe"
 screenshot_describe = "safe"
+look_at_camera = "safe"       # voice only (not in the model's tool list): one frame from the webcam, described by the local vision model, never saved
 remember_fact = "safe"
 forget_fact = "safe"          # a write to memory the user didn't plainly say (web/screen/note text, or words they never said) is escalated to a spoken yes in code: ev/safety/provenance.py
 recall = "safe"               # read-only search of the vault; results are wrapped as untrusted data

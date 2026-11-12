@@ -27,8 +27,14 @@ followup_question_window_s = 12   # longer window when EV's reply ended with a q
 followup_max_turns = 8         # safety cap on back-to-back turns per activation
 followup_patience_s = 2        # every back-to-back turn adds this much to the listening window (people answer slower mid-conversation)
 followup_window_max_s = 15     # ...but never more than this
-continuous_mic = false         # true = keep one mic stream open for the whole conversation (no re-open between turns, nothing lost at the hand-off between EV speaking and you answering). Off until tried on your mic and speakers
+continuous_mic = true          # one mic stream stays open: with the wake word it is the same stream the wake word listens on, so what you say in the same breath as "Evie" or right as EV stops talking is not lost while a new stream opens (D33). false = the old stream per turn
 turn_gap_ms = 300              # pause between EV finishing and the mic reopening, so the speaker tail isn't heard as you
+listen_while_thinking = false  # true = the mic is also open while EV thinks. Say more before it answers ("what's the capital of... Australia") and the first part is dropped and joined to the rest. Never after a tool has run. Off until tried with your mic and room
+finish_window_s = 1.8          # a request that sounds unfinished ("open the", "can you", "and") keeps the mic open this long for the rest, up to finish_rounds times
+finish_rounds = 2
+interrupt_needs_name = true    # talking over EV only interrupts it if you start with its name ("EV, ..." / "Evie, ..."); anything else is ignored and EV carries on. The push-to-talk hotkey always stops it. false = any loud speech interrupts
+interrupt_listen_s = 1.4       # how much of what you said over EV is checked for its name
+interrupt_name_score = 0.5    # the wake-word model (trained on the name) also listens to what you said over EV; this score or more counts as hearing the name even when the speech model wrote something else ("Eveled")
 voice_interrupt = true         # talk over EV while it speaks and it stops and listens
 interrupt_min_ms = 300         # how long you must keep talking before EV stops (higher = fewer false stops)
 interrupt_margin = 1.5         # how much louder than EV's own echo (predicted from what was playing ~0.5 s ago) you must be; raise if EV still cuts itself off, e.g. on loud speakers
@@ -40,19 +46,20 @@ block_ms = 30
 input_device = ""              # "" = system default
 output_device = ""
 vad_aggressiveness_threshold = 0.5
-silence_ms_to_end = 550            # tuned from 700: shorter wait before EV acts; typical mid-sentence pauses are under 400 ms
+silence_ms_to_end = 800            # how long a pause ends your sentence. Was 550, which cut people off mid-sentence in real use (D33); a request that still sounds unfinished ("open the", "can you") is waited for as well, see conversation.finish_window_s
 max_utterance_s = 15
 min_utterance_ms = 250
 pre_roll_ms = 480                  # audio kept from before the VAD fired; 300 risked clipping soft first words
 
 [stt]
-model = "distil-small.en"       # English-only, small-class accuracy for real/accented speech; see DECISIONS D17. "base" is the faster, less accurate option (about 1.3 s quicker per turn here)
-compute_type = "int8"
-device = "cpu"
+model = "small"                 # chosen from a real-voice test on this laptop mic (D35): 35% word error against 68% for distil-small.en, and the only model that heard "Evie". Same GPU memory (+330 MB), 0.16 s per sentence. "distil-small.en" was the choice in D17
+compute_type = "int8"            # CPU precision
+gpu_compute_type = "int8_float16"  # GPU precision; measured here: +340 MB of VRAM for distil-small.en, 0.13 s per utterance against 1.64 s on the CPU (D32)
+device = "auto"                  # "auto" = the GPU when its CUDA libraries are installed and it works, else the CPU; "cpu" or "cuda" force one
 cpu_threads = 6
 language = "en"
 beam_size = 3
-hotwords = ["Evie", "EV", "Sam", "Spotify", "Firefox", "Chrome", "Discord", "Notepad", "Ollama", "VS Code", "YouTube", "display mode"]   # biases decoding toward words EV hears often
+hotwords = ["Evie", "EV", "Sam", "dashboard", "Spotify", "Firefox", "Chrome", "Discord", "Notepad", "Ollama", "VS Code", "YouTube", "display mode"]   # biases decoding toward words EV hears often
 
 [tts]
 engine = "piper"               # "piper" | "kokoro"; piper (hfc_female) is the main voice, kokoro is the optional more natural one
@@ -71,7 +78,10 @@ host = "127.0.0.1"
 port = 11434
 model = "qwen2.5:3b"
 fallback_model = "llama3.2:latest"
-num_ctx = 6144                 # persona + 27 tool schemas + facts need ~3k tokens; 2048 truncated the prompt. Measured on qwen2.5:3b (D24): 4096, 6144 and 8192 all sit 100% on the GPU (2.2-2.3 GB) at ~60 tok/s with the same load time
+deep_model = "qwen2.5:7b"      # "" = off. A bigger, slower model used ONLY when you ask: "think harder about...", "take your time", "use the bigger model". Measured here: ~6 s to load, ~10 tok/s (it spills to RAM: 4.7 GB on a 4 GB GPU), 5-7 s per answer, then ~2.5 s to reload the main model. Same tools, same safety gate
+deep_num_predict = 220         # reply length cap for those turns (the sentence cap is reply_max_sentences_detail)
+deep_keep_alive = "2m"         # the big model leaves GPU memory soon after, so the main one can have it back
+num_ctx = 6144                # persona + 27 tool schemas + facts need ~3k tokens; 2048 truncated the prompt. Measured on qwen2.5:3b (D24): 4096, 6144 and 8192 all sit 100% on the GPU (2.2-2.3 GB) at ~60 tok/s with the same load time
 temperature = 0.6
 num_predict = 110              # replies are spoken, so they are short; the sentence cap below is the real limit
 reply_max_sentences = 2        # hard cap per turn unless the user asks for detail
@@ -79,7 +89,7 @@ reply_max_sentences_detail = 6 # cap when they do ("explain in detail", "tell me
 keep_alive = "30m"
 direct_tool_replies = false    # true = speak a finished tool result ("Opened Spotify.") as is and skip the second model call. Measured here: no faster (the prompt cache makes that call ~free) and less natural, so off; try it on slow hardware
 filler_after_s = 1.3           # a slow tool (search, weather, screen read) gets a short "one sec" after this long; 0 = silent
-filler_tools = ["web_search", "get_weather", "read_screen", "screenshot_describe"]
+filler_tools = ["web_search", "get_weather", "read_screen", "screenshot_describe", "look_at_camera"]
 rewarm_after_s = 90            # if the model has been idle this long (or was unloaded for a screen read), reload it while you speak
 request_timeout_s = 60
 vram_budget_gb = 3.2           # the dashboard warns when a chat model larger than this is picked (this GPU has 4 GB, shared with the speech and voice models)
@@ -92,14 +102,22 @@ model = "qwen2.5vl:3b"             # measured 5/5 vs moondream 2/5 on UI-reading
 keep_alive = "0"               # unload immediately after use
 max_image_px = 768
 
+[camera]
+# Say "what am I holding?" or "can you see me?" and EV opens the camera for about a second, asks the local vision model about
+# that one frame, and closes it. Nothing runs in the background and nothing is saved. Turn it off here; the dashboard can't.
+enabled = true
+index = 0                      # which camera: 0 is the first one Windows lists
+warmup_frames = 6              # frames thrown away at least before the picture is taken (the camera also waits for its exposure to settle); about 2 s in all
+
 [screen]
 max_capture_px = 1280
 ocr_min_confidence = 0.5
 agent_max_steps = 8
+page_load_s = 3.5              # "search YouTube for X and play the first video": how long to wait for the page before the screen agent looks at it
 screenshot_dir = ""             # where "take a screenshot" saves PNGs; "" = Pictures\EV Screenshots
 
 [overlay]
-# The island: a small black pill at the top of the screen with two eyes that follow your mouse pointer. It opens while EV
+# The island: a small black pill at the top of the screen showing a row of level bars (the sound wave). It opens while EV
 # listens or talks, half-opens while it thinks, and in display mode grows downward to show the conversation as text.
 enabled = true
 toolkit = "qt"                 # "qt" | "tk"
@@ -107,14 +125,13 @@ anchor = "top-center"          # top-center|top-left|top-right|bottom-center|...
 offset_x = 0
 offset_y = 6
 monitor = 0
-width = 116                    # the island at rest
+width = 96                     # the island at rest
 height = 34
-wide_width = 236               # fully open (listening / speaking)
-wide_height = 42
-idle_visible = true            # false = the island appears only while EV is busy and fades away after
-follow_cursor = true           # the eyes follow the mouse pointer
-eye_color = "#ffffff"
-accent = "#ff2d3f"             # the ring and eye colour while EV is working on your screen, or when something goes wrong
+wide_width = 150               # fully open (listening / speaking)
+wide_height = 40
+idle_visible = false           # false = the island appears only while EV is busy and fades away after; true = a resting pill stays on screen
+bar_color = "#ffffff"
+accent = "#ff2d3f"             # the ring and bar colour while EV is working on your screen, or when something goes wrong
 bar_count = 11
 fps = 30
 fade_ms = 180

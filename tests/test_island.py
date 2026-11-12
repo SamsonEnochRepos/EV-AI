@@ -1,14 +1,12 @@
-"""The island's animation maths (ev/overlay/anim.py): eyes, springs, shape and placement. No Qt needed."""
+"""The island's animation maths (ev/overlay/anim.py): springs, shape and placement. No Qt needed."""
 from __future__ import annotations
-
-import random
 
 import pytest
 
 from ev.overlay.anim import (
-    Eyes,
     IslandSizes,
     Spring,
+    alert_target,
     approach,
     body_origin,
     corner_radius,
@@ -20,69 +18,9 @@ from ev.overlay.anim import (
 S = IslandSizes()
 
 
-def run(eyes: Eyes, seconds: float, state: str = "idle", **kw) -> None:
-    t = kw.pop("start", 0.0)
-    for i in range(int(seconds * 60)):
-        eyes.step(1 / 60, t + i / 60, state, **kw)
-
-
-def test_eyes_look_toward_the_pointer_and_saturate():
-    e = Eyes(random.Random(1))
-    run(e, 1.0, cursor=(400.0, 300.0))
-    assert e.gx > 0.7 and e.gy > 0.6                       # pointer is right of and below the island
-    run(e, 1.0, cursor=(-400.0, -300.0))
-    assert e.gx < -0.7 and e.gy < -0.6
-    run(e, 1.0, cursor=(100000.0, 0.0))
-    assert -1.0 <= e.gx <= 1.0                              # a far away pointer never pushes the eyes out of the pill
-
-
-def test_a_pointer_that_has_stopped_moving_lets_the_eyes_wander_but_a_busy_state_does_not_follow_it():
-    e = Eyes(random.Random(2))
-    run(e, 0.5, cursor=(300.0, 0.0), still_s=60.0)         # idle + a long-still pointer: free to look around
-    seen = set()
-    for i in range(600):
-        e.step(1 / 60, 40.0 + i / 60, "idle", cursor=(300.0, 0.0), still_s=60.0)
-        seen.add(round(e.gx, 1))
-    assert len(seen) > 3
-    t = Eyes(random.Random(2))
-    run(t, 1.0, "thinking", cursor=(300.0, 0.0))
-    assert t.gy < -0.4                                      # thinking: looking up and away
-
-
-def test_eyes_blink_regularly_and_close_when_paused():
-    e = Eyes(random.Random(3))
-    lids = []
-    for i in range(60 * 20):
-        e.step(1 / 60, i / 60, "idle")
-        lids.append(e.lid)
-    assert min(lids) < 0.2 and max(lids) == pytest.approx(1.0, abs=0.01)
-    s = Eyes(random.Random(3))
-    run(s, 1.0, "paused")
-    assert s.lid < 0.15 and s.squint == 0.0
-
-
-def test_hovering_or_a_cheer_makes_the_eyes_smile_and_it_wears_off():
-    e = Eyes(random.Random(4))
-    run(e, 1.0, hover=True)
-    assert e.squint > 0.9
-    run(e, 1.0, hover=False, start=1.0)
-    assert e.squint < 0.1
-    e.cheer(5.0, 1.0)
-    for i in range(30):
-        e.step(1 / 60, 5.0 + i / 60, "idle")
-    assert e.squint > 0.3
-    run(e, 2.0, start=7.0)
-    assert e.squint < 0.1
-
-
-def test_eyes_swell_with_the_voice_and_turn_accent_when_acting():
-    e = Eyes(random.Random(5))
-    run(e, 1.0, "listening", level=1.0)
-    assert e.scale > 1.2
-    run(e, 1.0, "acting")
-    assert e.alert > 0.9 and e.open < 0.7
-    run(e, 1.0, "idle", start=1.0)
-    assert e.alert < 0.1
+def test_the_accent_colour_is_for_working_on_the_screen_and_errors_only():
+    assert alert_target("acting") == alert_target("error") == 1.0
+    assert all(alert_target(st) == 0.0 for st in ("idle", "listening", "thinking", "speaking", "paused"))
 
 
 def test_spring_arrives_with_a_little_overshoot_and_survives_a_long_frame():

@@ -16,6 +16,7 @@ dependencies = [
     "pynput>=1.7",
     "pystray>=0.19",
     "pillow>=10",
+    "opencv-python>=4.8",          # the camera tool (one frame, on request); rapidocr already pulls it in
     "psutil>=5.9",
     "ddgs>=9.0",
     "pycaw>=20240210",

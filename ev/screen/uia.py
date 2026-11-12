@@ -97,7 +97,7 @@ def find_element(items: list[UIElement], name: str) -> UIElement | None:
     exact = [e for e in items if e.name.lower() == n]
     if exact:
         return exact[0]
-    part = [e for e in items if n in e.name.lower()]
+    part = [e for e in items if n in e.name.lower() and len(e.name) <= max(48, 4 * len(n))]    # a control, not a paragraph that mentions it
     return min(part, key=lambda e: len(e.name)) if part else None
 
 

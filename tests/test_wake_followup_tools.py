@@ -462,3 +462,21 @@ def test_planner_failure_falls_back(planner_on, cfg, memory, policy, registry):
     brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("Sure.")], seen)
     brain.client.chat = lambda *a, **k: (_ for _ in ()).throw(LLMError("boom"))     # type: ignore[method-assign]
     assert brain._plan_lookup("who won the match last night?") is None
+
+
+def test_planner_never_searches_for_a_bare_latest(planner_on, cfg, memory, policy, registry):
+    """The log showed "Can you do that for me?" turned into a web search for "latest": no topic, random news."""
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("latest")], seen)
+    assert brain._plan_lookup("who won the match last night?") is None
+    fake.replies = [text_reply("Latest."), ]
+    assert brain._plan_lookup("who won the match last night?") is None
+    fake.replies = [text_reply("latest news")]
+    assert brain._plan_lookup("what's happening in the world today?") == "latest news"
+
+
+def test_planner_is_not_asked_about_do_that_requests(planner_on, cfg, memory, policy, registry):
+    seen: list[str] = []
+    brain, fake = _planner_brain(cfg, memory, policy, registry, [text_reply("Sure.")], seen)
+    brain.respond("Can you do that for me?")
+    assert not seen and len(fake.requests) == 1                      # straight to the chat model, no planner call

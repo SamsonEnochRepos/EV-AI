@@ -128,9 +128,18 @@ pre { white-space: pre-wrap; font: 12.5px/1.55 var(--mono); margin: 0; color: va
 .hud .panel { margin: 0; }
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .orb-panel { padding: 8px 16px 18px; }
+.view-toggle-row { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.view-toggle { display: inline-flex; gap: 2px; background: color-mix(in srgb, var(--bg) 80%, transparent); border: 1px solid var(--line-soft); border-radius: 3px; padding: 2px; }
+.view-toggle button { all: unset; box-sizing: border-box; cursor: pointer; padding: 4px 12px; font: 600 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); border-radius: 2px; transition: color 0.15s, background 0.15s, box-shadow 0.15s; }
+.view-toggle button:hover { color: var(--text); }
+.view-toggle button.on { color: var(--text); background: color-mix(in srgb, var(--accent) 20%, transparent); border: 1px solid var(--line); box-shadow: 0 0 10px var(--glow); }
 .orb-wrap { position: relative; width: 100%; aspect-ratio: 1.12; max-height: 520px; margin: 0 auto; }
 .orb-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.orb-wrap canvas[hidden] { display: none !important; }
 .orb-core { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; padding: 0 26%; }
+.orb-wrap.face-mode .orb-core { justify-content: flex-end; padding: 0 8% 3%; }
+.orb-wrap.face-mode .orb-state { font-size: clamp(11px, 1.4vw, 15px); }
+.orb-wrap.face-mode .orb-sub { margin-top: 6px; max-height: 2.6em; }
 .orb-state { font: 700 clamp(15px, 2.1vw, 24px)/1.1 var(--mono); letter-spacing: 0.3em; text-transform: uppercase; color: var(--text); text-shadow: 0 0 18px var(--accent), 0 2px 8px #000; padding-left: 0.3em; }
 .orb-sub { margin-top: 10px; font-size: 12.5px; color: var(--text); opacity: 0.85; max-height: 3.9em; overflow: hidden; text-shadow: 0 0 10px #000, 0 0 3px #000, 0 1px 2px #000; }
 .processing { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
@@ -176,6 +185,8 @@ body[data-state="thinking"] .meter i, body[data-state="transcribing"] .meter i, 
   .rail-status { display: none; }
   .themes { margin-left: auto; } .themes .label { display: none; }
   .hud { grid-template-columns: 1fr; }
+  .view-toggle-row { justify-content: center; }
+  .view-toggle button { padding: 4px 10px; font-size: 9.5px; }
   header.top, main { padding-left: 14px; padding-right: 14px; } #notice { margin: 0 14px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

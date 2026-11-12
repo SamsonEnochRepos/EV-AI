@@ -37,6 +37,7 @@ function applyTheme(name) {
   document.documentElement.dataset.theme = t;
   try { localStorage.setItem("ev-theme", t); } catch { /* private window or blocked storage */ }
   EVOrb.refreshColors();
+  EVFace.refreshColors();
 }
 let savedTheme = "crimson";
 try { savedTheme = localStorage.getItem("ev-theme") || "crimson"; } catch { /* storage blocked */ }
@@ -59,7 +60,10 @@ document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("cli
   document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
   for (const name of Object.keys(loaders)) $("tab-" + name).hidden = name !== b.dataset.tab;
   $("page-title").textContent = TITLES[b.dataset.tab];
-  if (b.dataset.tab !== "live") EVOrb.unmount();
+  if (b.dataset.tab !== "live") {
+    EVOrb.unmount();
+    EVFace.unmount();
+  }
   guard(loaders[b.dataset.tab])();
 }));
 document.querySelectorAll("[data-control]").forEach((b) => b.addEventListener("click", guard(async () => {
@@ -76,11 +80,42 @@ const ORB_LABEL = { idle: "Standby", listening: "Listening", transcribing: "Tran
                     speaking: "Speaking", paused: "Paused", muted: "Paused", error: "Fault", offline: "Offline" };
 const clock = (at) => new Date((at || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour12: false });
 
+// view preference: default "face"
+let currentView = "face";
+try { currentView = localStorage.getItem("ev-view") || "face"; } catch { /* storage blocked */ }
+if (currentView !== "orb" && currentView !== "face") currentView = "face";
+
+function switchView(view) {
+  currentView = view === "orb" ? "orb" : "face";
+  try { localStorage.setItem("ev-view", currentView); } catch { /* storage blocked */ }
+  const orbCanvas = $("orb");
+  const faceCanvas = $("face");
+  const isOrb = currentView === "orb";
+  if (orbCanvas) orbCanvas.hidden = !isOrb;
+  if (faceCanvas) faceCanvas.hidden = isOrb;
+  const wrap = $("orbwrap");
+  if (wrap) wrap.classList.toggle("face-mode", !isOrb);   // the state label moves off the face
+  document.querySelectorAll(".view-toggle button").forEach((b) => {
+    const active = (b.dataset.view === "orb" && isOrb) || (b.dataset.view === "face" && !isOrb);
+    b.classList.toggle("on", active);
+    b.setAttribute("aria-checked", active ? "true" : "false");
+  });
+  if (isOrb) {
+    EVFace.unmount();
+    if (orbCanvas) EVOrb.mount(orbCanvas);
+  } else {
+    EVOrb.unmount();
+    if (faceCanvas) EVFace.mount(faceCanvas);
+  }
+}
+
 function setState(s) {
   status.state = s;
   document.body.dataset.state = s === "muted" ? "paused" : s;
   $("state").textContent = ORB_LABEL[s] || s;
-  EVOrb.setState(s === "muted" ? "paused" : s === "offline" ? "error" : s);
+  const normState = s === "muted" ? "paused" : s === "offline" ? "error" : s;
+  EVOrb.setState(normState);
+  EVFace.setState(normState);
   const label = $("orb-state");
   if (label) label.textContent = ORB_LABEL[s] || s;
 }
@@ -96,13 +131,32 @@ async function refreshStatus() {
 function loadLive() {
   const el = $("tab-live");
   clear(el);
+  const isOrb = currentView === "orb";
   el.append(h("div", { class: "hud" },
     h("div", { class: "col left" },
       h("div", { class: "panel" }, h("h2", {}, "Skills"), h("div", { class: "skill-list", id: "skilllist" })),
       h("div", { class: "panel", id: "side" })),
     h("div", { class: "col" },
       h("div", { class: "panel orb-panel" },
-        h("div", { class: "orb-wrap" }, h("canvas", { id: "orb", "aria-label": "EV's state" }),
+        h("div", { class: "view-toggle-row" },
+          h("div", { class: "view-toggle", role: "radiogroup", "aria-label": "Visual mode" },
+            h("button", {
+              class: isOrb ? "on" : "",
+              "data-view": "orb",
+              role: "radio",
+              "aria-checked": isOrb ? "true" : "false",
+              onclick: () => switchView("orb")
+            }, "Orb"),
+            h("button", {
+              class: !isOrb ? "on" : "",
+              "data-view": "face",
+              role: "radio",
+              "aria-checked": !isOrb ? "true" : "false",
+              onclick: () => switchView("face")
+            }, "Face"))),
+        h("div", { class: isOrb ? "orb-wrap" : "orb-wrap face-mode", id: "orbwrap" },
+          h("canvas", { id: "orb", hidden: !isOrb, "aria-label": "EV's state" }),
+          h("canvas", { id: "face", hidden: isOrb, "aria-label": "EV holographic face" }),
           h("div", { class: "orb-core" }, h("div", { class: "orb-state", id: "orb-state" }), h("div", { class: "orb-sub", id: "orb-sub" }))),
         h("div", { class: "processing" }, h("span", { class: "label" }, "Processing"), h("div", { class: "meter" }, h("i"))),
         h("div", { class: "tiles", id: "tiles" })),
@@ -110,7 +164,11 @@ function loadLive() {
     h("div", { class: "col" },
       h("div", { class: "panel" }, h("h2", {}, "Live feed"), h("div", { class: "feed", id: "feed" })),
       h("div", { class: "panel" }, h("h2", {}, "Spoke up on its own"), h("div", { id: "proactive" })))));
-  EVOrb.mount($("orb"));
+  if (isOrb) {
+    EVOrb.mount($("orb"));
+  } else {
+    EVFace.mount($("face"));
+  }
   renderFeed();
   renderTools();
   renderEvents();
@@ -199,7 +257,10 @@ function connect() {
   const on = (name, fn) => es.addEventListener(name, (m) => { try { fn(JSON.parse(m.data)); } catch { /* ignore a malformed event */ } });
   es.onopen = () => { document.body.dataset.conn = "on"; $("online").textContent = "ONLINE"; };
   on("state", (d) => setState(d.new));
-  on("level", (d) => EVOrb.setLevel(d.v));
+  on("level", (d) => {
+    EVOrb.setLevel(d.v);
+    EVFace.setLevel(d.v);
+  });
   on("turn", (d) => {
     const sub = $("orb-sub");
     if (d.user) { pushFeed("heard", "You", d.user, d.at, `heard:${d.at}`); if (sub) sub.textContent = d.user; }
@@ -364,3 +425,27 @@ async function loadPolicy() {
 guard(loadLive)();
 connect();
 setInterval(() => guard(refreshStatus)(), 5000);
+
+// dev-only demo preview (?demo=face)
+if (new URLSearchParams(window.location.search).get("demo") === "face") {
+  const DEMO_STATES = ["idle", "listening", "transcribing", "thinking", "acting", "speaking", "paused", "error"];
+  let demoIdx = 0;
+  setInterval(() => {
+    demoIdx = (demoIdx + 1) % DEMO_STATES.length;
+    setState(DEMO_STATES[demoIdx]);
+  }, 4000);
+  setInterval(() => {
+    if (status.state === "speaking") {
+      const v = Math.max(0, 0.4 + 0.5 * Math.sin(Date.now() / 150));
+      EVOrb.setLevel(v);
+      EVFace.setLevel(v);
+    } else if (status.state === "listening") {
+      const v = Math.max(0, 0.3 + 0.4 * Math.sin(Date.now() / 400));
+      EVOrb.setLevel(v);
+      EVFace.setLevel(v);
+    } else {
+      EVOrb.setLevel(0);
+      EVFace.setLevel(0);
+    }
+  }, 100);
+}
