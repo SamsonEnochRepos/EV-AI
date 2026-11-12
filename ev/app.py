@@ -147,7 +147,7 @@ class EVApp:
 
         self.registry.register(Tool(
             "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
-            {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True))
+            {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True, llm_visible=False))
 
     # ---- dashboard: a loopback page, opened on request with a one-time sign-in link
     def _register_dashboard_tool(self) -> None:

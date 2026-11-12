@@ -62,6 +62,9 @@ def make_env(tmp_path: Path, replies, answer: bool | None = False, overrides: di
     turn = TurnState()
     reg = build_tools(ToolContext(cfg, memory, Scheduler(memory, lambda _m: None), policy, vault=vault, index=index, turn=turn,
                                   notes_dir=tmp_path / "notes"))
+    for name in ("recall", "forget_fact"):          # voice-routed in the product; model-visible here to prove the escalation holds anyway
+        if (t := reg.get(name)) is not None:
+            t.llm_visible = True
     # stand-ins for the tools whose results come from outside: web and screen text are untrusted data
     reg.register(Tool("web_search", "s", {"query": {"type": "string"}},
                       lambda query: ToolResult(True, WEB_POISON, untrusted=True, source="web_search"), ("query",)))

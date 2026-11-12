@@ -102,7 +102,7 @@ def test_real_prompt_leaves_room_for_history(app):
     registry. If this fails, conversation history is being squeezed out of num_ctx: trim a description or a persona line."""
     b = app.brain
     fixed = b._est_tokens(b.system_prompt()) + b._est_tokens(app.registry.schemas())
-    assert len(app.registry.schemas()) >= 15, "the tools did not register; this test would prove nothing"
+    assert len(app.registry.schemas()) >= 10, "the tools did not register; this test would prove nothing"
     assert b.ctx_budget - fixed >= 400, f"fixed prompt ~{fixed} of {b.ctx_budget}: under 400 tokens left for history"
 
 

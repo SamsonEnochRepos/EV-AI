@@ -308,7 +308,7 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
                       open_app, ("name",), timeout_s=20, direct=True))
     reg.register(Tool("open_file", "Open the last screenshot or note EV saved (which=last), or a file path the user gave.",
                       {"which": {"type": S, "enum": ["last"]}, "path": {"type": S, "maxLength": 300}},
-                      open_file, timeout_s=15, direct=True))
+                      open_file, timeout_s=15, direct=True, llm_visible=False))      # voice-routed: costs the model no prompt
     reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one.",
                       {"site": {"type": S, "description": "youtube, github, a domain...", "maxLength": 60},
                        "query": {"type": S, "maxLength": 200},
@@ -327,7 +327,8 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         "text": {"type": S, "maxLength": 200},
         "in_minutes": {"type": "number", "minimum": 0, "maximum": 525600},
         "at": {"type": S, "maxLength": 12}}, set_reminder, ("text",), direct=True))
-    reg.register(Tool("list_reminders", "List the user's pending reminders.", {}, list_reminders, direct=True))
+    reg.register(Tool("list_reminders", "List the user's pending reminders.", {}, list_reminders, direct=True,
+                      llm_visible=False))
     reg.register(Tool("media_control", "Control media playback.", {
         "action": {"type": S, "enum": ["play_pause", "next", "previous", "stop"]}},
         media_control, ("action",), direct=True))
@@ -344,11 +345,12 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         "key": {"type": S, "description": "short label, e.g. favorite_color", "maxLength": 60},
         "value": {"type": S, "maxLength": 300}, "about": about_spec}, remember_fact, ("key", "value"), direct=True))
     reg.register(Tool("forget_fact", "Delete a saved fact about the user.",
-                      {"key": {"type": S, "maxLength": 60}, "about": about_spec}, forget_fact, ("key",), direct=True))
+                      {"key": {"type": S, "maxLength": 60}, "about": about_spec}, forget_fact, ("key",), direct=True,
+                      llm_visible=False))
     if ctx.index is not None:
         reg.register(Tool("recall", "Search the user's notes for what they said or wrote earlier. when: today, yesterday, last week, a month.",
                           {"query": {"type": S, "maxLength": 120}, "when": {"type": S, "maxLength": 30}}, recall,
-                          timeout_s=10))
+                          timeout_s=10, llm_visible=False))
     if ctx.vault is not None:
         reg.register(Tool("keep_fact", "Keep a hand-written note in the facts file as a fact.",
                           {"id": {"type": S, "maxLength": 12}}, keep_fact, ("id",), direct=True, llm_visible=False))
