@@ -246,6 +246,12 @@ function connect() {
     renderTools();
     pushFeed("tool " + (d.decision || ""), `Tool · ${d.decision || ""}`, `${d.tool}${d.args ? " " + Object.values(d.args).join(", ").slice(0, 80) : ""}`, d.at, key + ":f");
   });
+  on("agent", (d) => {
+    const key = `agent:${d.at}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pushFeed("tool " + d.verdict, `${d.agent} · ${d.verdict}${d.by === "you" ? " (you)" : ""}`, `${d.what}${d.reason ? " — " + d.reason : ""}`, d.at, key + ":f");
+  });
   es.onerror = () => { document.body.dataset.conn = "off"; $("online").textContent = "OFFLINE"; setState("offline"); };
 }
 

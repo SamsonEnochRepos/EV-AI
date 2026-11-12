@@ -7,10 +7,14 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from ev.agents.listener import AgentListener, load_or_create_token
+from ev.agents.rules import Rules
+from ev.agents.supervisor import AgentSupervisor
 from ev.audio.capture import MicError, Recorder, SharedMic, mic_blocks
 from ev.audio.endpoint import looks_unfinished
 from ev.audio.interrupt import InterruptMonitor
@@ -119,6 +123,7 @@ class EVApp:
         self.bus.subscribe("state", lambda old, new: self.hub.publish("state", old=old.value, new=new.value))
         self.brain.on_tool_result = lambda e: self.hub.publish("tool", **e)
         self.dashboard: DashboardServer | None = None
+        self.agents, self.agent_listener = self._build_agents()
         self._register_dashboard_tool()
 
     # ---- optional tools (screen/control) registered lazily so lightweight setups still start
@@ -161,6 +166,56 @@ class EVApp:
         self.registry.register(Tool("open_dashboard", "Open the dashboard in the browser.", {}, open_dashboard, (),
                                     direct=True, llm_visible=False))
 
+    # ---- coding agents (Claude Code, Codex) asking for approval: ev/agents
+    def _build_agents(self) -> tuple[AgentSupervisor | None, AgentListener | None]:
+        ac = self.cfg.raw.get("agents", {})
+        if not ac.get("enabled", False):
+            return None, None
+        from ev.tools.base import Tool, ToolResult
+
+        rules = Rules.load(self.cfg.root / str(ac.get("rules_file", "config/agent_rules.toml")))
+        sup = AgentSupervisor(rules, self.cfg.data_path("agent_audit.jsonl"), ask=self._agent_ask, notify=self.overlay.send_notice,
+                              publish=lambda e: self.hub.publish("agent", **e), ask_wait_s=float(ac.get("ask_wait_s", 25)))
+        token = load_or_create_token(self.cfg.data_path("agent_token"))
+        if ac.get("advisor", False):
+            from ev.agents.advisor import Advisor
+
+            sup.advisor = Advisor()
+
+        def agents_control(action: str, minutes: float = 60.0) -> ToolResult:
+            if action == "pause":
+                sup.pause(minutes)
+                return ToolResult(True, f"Okay, I'll stop answering the coding agents for {_span(minutes)}. Their own prompts will show.")
+            if action == "resume":
+                sup.pause(0)
+                return ToolResult(True, "Okay, I'm answering the coding agents again.")
+            return ToolResult(True, sup.status() + (" Approvals are paused." if sup.paused else ""))
+
+        def agents_allow(group: str, minutes: float = 60.0) -> ToolResult:
+            if not sup.last_cwd:
+                return ToolResult(False, "I haven't seen a coding agent ask for anything yet, so I don't know which project you mean.")
+            label = sup.grant(group, minutes)
+            return ToolResult(True, f"Okay, the agents can {label} in {Path(sup.last_cwd).name} for {_span(minutes)}.")
+
+        self.registry.register(Tool("agents_control", "Pause, resume or report on answering coding agents' approval requests.", {
+            "action": {"type": "string", "enum": ["pause", "resume", "status"]},
+            "minutes": {"type": "number", "minimum": 1, "maximum": 720}}, agents_control, ("action",), direct=True, llm_visible=False))
+        self.registry.register(Tool("agents_allow", "Let the coding agents do one kind of thing in their current project for a while.", {
+            "group": {"type": "string", "enum": sorted(rules.groups)},
+            "minutes": {"type": "number", "minimum": 1, "maximum": 240}}, agents_allow, ("group",), direct=True, llm_visible=False))
+        self.gate.describers["agents_allow"] = lambda a: (
+            f"let the coding agents {rules.groups.get(str(a.get('group')), {}).get('label', 'do that')} for {_span(float(a.get('minutes', 60)))}")
+        return sup, AgentListener(sup, token, int(ac.get("port", 47831)))
+
+    def _agent_ask(self, readback: str) -> bool | None:
+        """A coding agent's request fell between the rules: ask out loud, but never in the middle of a conversation."""
+        if self.paused or self.muted or not self._turn_lock.acquire(timeout=20):
+            return None
+        try:
+            return self.confirm(readback)
+        finally:
+            self._turn_lock.release()
+
     def _start_dashboard(self) -> None:
         dc = self.cfg.raw.get("dashboard", {})
         if not dc.get("enabled", False) or self.dashboard is not None:
@@ -201,6 +256,8 @@ class EVApp:
             log.warning("%d unconfirmed fact(s) in the vault; say \"review my unconfirmed facts\" to go through them", n)
         self.scheduler.start()
         self._start_dashboard()
+        if self.agent_listener:
+            self.agent_listener.start()
         self.hotkeys.start()
         if self.wake:
             self._open_permanent_mic()
@@ -299,6 +356,8 @@ class EVApp:
         self.scheduler.stop()
         if self.dashboard:
             self.dashboard.stop()
+        if self.agent_listener:
+            self.agent_listener.stop()
         self.overlay.stop()
         if self.speaker:
             self.speaker.close()
@@ -721,3 +780,8 @@ class EVApp:
             self.sm.to(State.IDLE, force=True)
             return None
         return self._followup_wait(text, res.text, turn)
+
+
+def _span(minutes: float) -> str:
+    m = int(round(minutes))
+    return f"{m // 60} hour{'s' if m // 60 != 1 else ''}" if m >= 60 and m % 60 == 0 else f"{m} minute{'s' if m != 1 else ''}"

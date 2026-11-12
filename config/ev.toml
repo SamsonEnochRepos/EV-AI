@@ -152,6 +152,16 @@ daily_summaries = true         # append the rolling conversation summary to EV/D
 auto_recall = false            # true = put up to auto_recall_k wrapped snippets from your notes in each request. Off: not measured with a real vault
 auto_recall_k = 2
 
+[agents]
+# Answers Claude Code's and Codex's approval requests from config/agent_rules.toml (reasons in config/constitution.md): safe checks
+# are allowed, destructive things are refused, everything in between is asked out loud. `python -m ev.agents.install` prints the
+# hook settings that point the agents here. EV not running, paused, or nobody answering all mean the agent shows its own prompt.
+enabled = true
+port = 47831                   # fixed, because the agents' hook settings name it; loopback only, bearer token in data/agent_token
+rules_file = "config/agent_rules.toml"
+advisor = false                # true = check pip/npm installs against PyPI, npm and OSV.dev first (known vulnerabilities are refused). Off: it is new network traffic
+ask_wait_s = 25                # how long a second request waits for the question already being asked
+
 [dashboard]
 # A local page for watching EV and changing how it feels: http://127.0.0.1:<port>, opened by saying "open the dashboard" or from the
 # tray. Loopback only; every visit needs a one-time sign-in link EV opens for you. It cannot change policy.toml or anything that

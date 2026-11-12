@@ -1,0 +1,74 @@
+# Rules for approving what a coding agent (Claude Code, Codex) asks to do. See config/constitution.md for the reasons.
+# These are matched against the request itself (tool name, command, path), never against anything a model or a web page says.
+# The order of authority is fixed in ev/agents/rules.py: deny > ask > allow, and a voice-set "allow for an hour" can only
+# widen the `ask` set, never touch `deny`.
+
+[deny]
+# Whole words that remove or destroy things. Matched anywhere in the command (inside bash -c "..." too), case-insensitive.
+words = ["rm", "rmdir", "rd", "del", "erase", "remove-item", "unlink", "shred", "diskpart", "mkfs", "shutdown",
+         "restart-computer", "stop-computer", "takeown", "cipher"]
+# Regexes over the whole command, case-insensitive.
+patterns = [
+  'git\s+clean\b',
+  'git\s+reset\s+--hard',
+  'git\s+push\b.*(--force\b|\s-f\b|\s\+\S)',
+  'git\s+branch\s+.*-D\b',
+  'git\s+checkout\s+(--\s+)?\.\s*$',
+  'git\s+stash\s+(drop|clear)',
+  '(curl|wget|iwr|invoke-webrequest)\b[^|;&]*\|\s*(sh|bash|zsh|iex|invoke-expression|powershell|pwsh|python)',
+  '\b(iex|invoke-expression)\b',
+  '-(enc|encodedcommand)\b',
+  'format\s+[a-z]:',
+  '\breg(\.exe)?\s+(add|delete|import|load|unload|restore)\b',
+  '\b(sc|sc\.exe)\s+(delete|create|config)\b',
+  '\bschtasks\b.*\/(create|delete|change)',
+  '\bnet\s+(user|localgroup)\b',
+  'chmod\s+(-r\s+)?[0-7]*777\b',
+  'npm\s+(unpublish|deprecate)\b',
+  'pip\s+download\b.*--index-url\s+http:',
+  '\bnpm\s+config\s+set\b.*(registry|_auth)',
+]
+# A command or a path that touches any of these is refused: credentials, and the files that switch this supervisor off.
+sensitive = [
+  '\.ssh\b', '\.aws\b', '\.gnupg\b', '\.azure\b', '\.kube\b', 'id_rsa', 'id_ed25519', '\.netrc\b', '\.pypirc\b', '\.npmrc\b',
+  'credentials(\.json)?\b', 'appdata[\\/]+roaming[\\/]+(code|microsoft)[\\/]', 'login data\b', 'cookies\b',
+  '\.claude[\\/]+settings', '\.claude[\\/]+hooks', '\.codex[\\/]+(config\.toml|hooks\.json|rules)', 'agent_rules\.toml',
+  'policy\.toml',
+]
+
+[allow]
+# Tools that only look. A path argument still has to stay inside the project folder, otherwise the agent is asked.
+read_tools = ["Read", "Glob", "Grep", "LS", "NotebookRead", "TodoWrite", "BashOutput", "KillShell", "ExitPlanMode", "Task", "TaskCreate",
+              "TaskUpdate", "TaskList", "TaskGet", "ToolSearch"]
+# Tools that write files. Allowed inside the project folder only.
+write_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+# Shell commands that only read or check. A command matches when its first words equal a prefix. Every `;`, `&&`, `||` and `|`
+# separated part must match, and a `>` to anywhere but nul is not allowed.
+commands = [
+  "ls", "dir", "pwd", "cd", "echo", "cat", "type", "head", "tail", "wc", "sort", "uniq", "tree", "where", "which", "whoami", "date",
+  "get-childitem", "get-content", "get-location", "select-string", "findstr", "grep", "rg", "fd", "find", "stat", "file", "diff", "true",
+  "git status", "git diff", "git log", "git show", "git blame", "git rev-parse", "git remote -v", "git config --get",
+  "python --version", "python -V", "node --version", "node -v", "npm --version", "pip --version", "pip list", "pip show", "pip freeze",
+  "python -m pytest", "pytest", "python -m ruff", "ruff check", "ruff format --check", "python -m mypy", "mypy", "python -m flake8",
+  "python -m black --check", "python -m unittest", "npm test", "npm run test", "npm run lint", "npm run typecheck", "npm run check",
+  "npx tsc --noEmit", "tsc --noEmit", "npx eslint", "npx jest", "npx vitest", "pnpm test", "pnpm lint", "pnpm run test", "pnpm run lint",
+  "yarn test", "yarn lint", "cargo test", "cargo check", "cargo clippy", "go test", "go vet", "dotnet test", "mvn test", "gradle test",
+  "make test", "make lint",
+]
+
+# Things that are fine to allow, but only because you said so by voice ("let Claude install packages for an hour"). Without that
+# they are asked about. Each is scoped to one project folder and expires.
+[groups.installs]
+label = "install packages"
+commands = ["pip install", "python -m pip install", "uv pip install", "uv add", "uv sync", "npm install", "npm i", "npm ci",
+            "pnpm install", "pnpm add", "yarn add", "yarn install", "cargo add", "poetry add", "poetry install"]
+[groups.git_write]
+label = "make git commits"
+commands = ["git add", "git commit", "git switch", "git checkout -b", "git stash", "git restore --staged", "git branch"]
+[groups.build]
+label = "run builds"
+commands = ["npm run build", "pnpm build", "pnpm run build", "yarn build", "cargo build", "make", "tsc", "dotnet build", "mvn package",
+            "gradle build", "python -m build"]
+[groups.web]
+label = "browse the web"
+tools = ["WebFetch", "WebSearch"]

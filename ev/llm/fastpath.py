@@ -326,6 +326,32 @@ def _screen_command(orig: str, t: str) -> FastMatch | None:
     return None
 
 
+_WHO = r"(?:claude(?: code)?|codex|the (?:coding )?agents?|my (?:coding )?agents?|them)"
+_AGENT_GROUPS = [("installs", r"install\w*|dependenc\w+|packages?"), ("git_write", r"commit\w*|git"), ("build", r"build\w*"),
+                 ("web", r"(?:browse|search|fetch)\w* (?:the )?(?:web|internet)|web")]
+
+
+def _agent_command(t: str) -> FastMatch | None:
+    """Pausing, resuming, checking on and widening what the coding agents are approved to do, said plainly."""
+    dur = re.search(_NUM + r"\s*" + _UNIT, t)
+    d = _dur(dur.group(1), dur.group(2)) if dur else None
+    mins = float(d.get("minutes", d.get("seconds", 0) / 60)) if d else 0.0
+    if re.search(_PRE + r"(?:pause|stop|hold|switch off|turn off)\s+(?:the\s+)?(?:agent\s+|coding\s+|claude\s+|codex\s+)*(?:approvals?|approving)\b", t) or \
+            re.search(_PRE + r"stop approving\b", t):
+        return FastMatch("agents_control", {"action": "pause", "minutes": mins or 60.0}, "agents_pause")
+    if re.search(_PRE + r"(?:resume|restart|start|continue|turn on|switch on)\s+(?:the\s+)?(?:agent\s+|coding\s+|claude\s+|codex\s+)*(?:approvals?|approving)\b", t):
+        return FastMatch("agents_control", {"action": "resume"}, "agents_resume")
+    if re.search(_PRE + rf"(?:what(?:'s| is| has| have)|how(?:'s| is| are)) {_WHO}(?: been)?(?: doing| up to| getting on)\b", t) or \
+            re.search(_PRE + r"(?:agent|approval) status\b|how many (?:approvals|requests)", t):
+        return FastMatch("agents_control", {"action": "status"}, "agents_status")
+    m = re.search(_PRE + rf"(?:let|allow|permit)\s+{_WHO}\s+(?:to\s+)?(?P<w>.{{3,60}}?)(?:\s+for\s+(?:the\s+next\s+)?{_NUM}\s*{_UNIT})?" + _POST, t)
+    if m:
+        for group, rx in _AGENT_GROUPS:
+            if re.search(rx, m["w"]):
+                return FastMatch("agents_allow", {"group": group, "minutes": mins or 60.0}, "agents_allow")
+    return None
+
+
 def match_fast(text: str) -> FastMatch | None:
     orig = re.sub(r"\s+", " ", text.strip())
     t = orig.lower()
@@ -376,6 +402,9 @@ def match_fast(text: str) -> FastMatch | None:
     mem = _memory_command(orig, t)
     if mem:
         return mem
+    agent = _agent_command(t)
+    if agent:
+        return agent
     scr = _screen_command(orig, t)
     if scr:
         return scr
