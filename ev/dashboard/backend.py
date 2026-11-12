@@ -4,7 +4,6 @@ file it writes is config/ev.local.toml."""
 from __future__ import annotations
 
 import copy
-import dataclasses
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,7 +16,6 @@ from ev.core.log import get_logger
 from ev.dashboard import localconf
 from ev.dashboard.server import DashboardError
 from ev.dashboard.settings_schema import ALLOWED, SETTINGS, SettingError, coerce
-from ev.skills.store import SkillError, canonical, validate
 from ev.tts.base import make_engine
 
 if TYPE_CHECKING:
@@ -41,17 +39,13 @@ class AppBackend:
     def status(self) -> dict[str, Any]:
         a = self.app
         eng = a.speaker.engine if a.speaker else None
-        proactive = a.proactive
         return {
             "state": a.sm.state.value, "paused": a.paused, "muted": a.muted, "display_mode": a.display_mode,
             "model": a.client.model, "voice": {"engine": getattr(eng, "name", None),
                                                "voice": getattr(eng, "voice", None) or getattr(eng, "voice_name", None)},
             "timers": [{"id": i, "seconds_left": round(s), "label": lab} for i, s, lab in a.scheduler.active_timers()],
             "reminders": [{"id": i, "text": t, "due": d} for i, t, d in a.memory.pending_reminders()],
-            "proactive": None if proactive is None else {"snoozed_min": proactive.snooze_minutes_left(),
-                                                         "rules": len(proactive.rules), "problems": list(proactive.problems)},
             "vault": None if a.vault is None else {"unconfirmed": len(a.vault.unconfirmed_facts())},
-            "skills_problems": list(a.skills.problems),
         }
 
     def control(self, action: str) -> dict[str, Any]:
@@ -70,11 +64,6 @@ class AppBackend:
     def _current(self, key: str) -> Any:
         s = ALLOWED[key]
         v = self.app.cfg.raw.get(s.section, {}).get(s.name)
-        if v is None and self.app.proactive is not None and s.section == "proactive":
-            g = self.app.proactive.guards
-            q = g.quiet_hours
-            v = {"quiet_start": q[0] if q else "", "quiet_end": q[1] if q else "", "max_spoken_per_hour": g.max_spoken_per_hour,
-                 "max_idle_s": g.max_idle_s, "defer_minutes": g.defer_minutes}.get(s.name)
         return v
 
     def settings(self) -> dict[str, Any]:
@@ -123,14 +112,6 @@ class AppBackend:
             a.context.enabled = bool(value)
         elif s.section == "context":
             a.context.on[s.name] = bool(value)
-        elif s.section == "proactive" and a.proactive is not None:
-            g = a.proactive.guards
-            if s.name in ("quiet_start", "quiet_end"):
-                start = str(a.cfg.raw["proactive"].get("quiet_start") or (g.quiet_hours or ("22:30", "07:30"))[0])
-                end = str(a.cfg.raw["proactive"].get("quiet_end") or (g.quiet_hours or ("22:30", "07:30"))[1])
-                a.proactive.guards = dataclasses.replace(g, quiet_hours=(start, end))
-            else:
-                a.proactive.guards = dataclasses.replace(g, **{s.name: value})
         else:
             return False
         return True
@@ -218,75 +199,10 @@ class AppBackend:
         threading.Thread(target=a.brain.refresh_prompt_cache, name="rewarm", daemon=True).start()
         return {"model": model, "saved": save}
 
-    def snooze(self, minutes: float) -> dict[str, Any]:
-        if self.app.proactive is None:
-            raise DashboardError("proactive is off", 409)
-        if not 0 <= minutes <= 720:
-            raise DashboardError("minutes must be between 0 and 720")
-        self.app.proactive.snooze(minutes)
-        return {"snoozed_min": self.app.proactive.snooze_minutes_left()}
-
-    # ---- skills
-    def skills(self) -> dict[str, Any]:
-        store = self.app.skills
-        out = []
-        for n in store.names():
-            s = store.get(n)
-            assert s is not None
-            out.append({"name": s.name, "description": s.description, "triggers": s.triggers, "say": s.say, "params": s.params,
-                        "steps": [{"tool": x.tool, "args": x.args, "optional": x.optional} for x in s.steps],
-                        "reads_outside": s.reads_outside})
-        return {"skills": out, "problems": list(store.problems),
-                "tools": sorted(self.app.registry.names())}
-
     def _exclusive(self) -> None:
-        """Skill runs and deletions can ask a spoken question, so they never overlap a conversation or each other."""
+        """Actions that can ask a spoken question never overlap a conversation or each other."""
         if not self.app._turn_lock.acquire(blocking=False):
             raise DashboardError("EV is busy with something else; try again in a moment", 409)
-
-    def run_skill(self, name: str) -> dict[str, Any]:
-        if self.app.skills.get(name) is None:
-            raise DashboardError("no such skill", 404)
-        self._exclusive()
-        try:
-            ok, message = self.app.brain.run_skill_for_user(name)
-        finally:
-            self.app._turn_lock.release()
-        return {"ok": ok, "message": message}
-
-    def save_skill(self, spec: dict[str, Any]) -> dict[str, Any]:
-        store = self.app.skills
-        name = canonical(str(spec.get("name", "")))
-        old = store.get(name)
-        raw = {"name": name, "description": spec.get("description", ""), "triggers": spec.get("triggers", []),
-               "say": spec.get("say", ""), "params": spec.get("params", {}), "steps": spec.get("steps", []),
-               "instructions": old.instructions_file if old else ""}
-        if not isinstance(raw["triggers"], list) or not isinstance(raw["steps"], list) or not isinstance(raw["params"], dict):
-            raise DashboardError("triggers and steps must be lists and params an object")
-        try:
-            skill = validate(raw, old.instructions if old else "")
-            missing = [s.tool for s in skill.steps if self.app.registry.get(s.tool) is None]
-            if missing:
-                raise SkillError(f"there is no tool called {missing[0]}")
-            store.save(skill, overwrite=old is not None)
-        except SkillError as e:
-            raise DashboardError(str(e)) from e
-        return {"saved": skill.name}
-
-    def delete_skill(self, name: str) -> dict[str, Any]:
-        if self.app.skills.get(name) is None:
-            raise DashboardError("no such skill", 404)
-        self._exclusive()
-        try:
-            res = self.app.gate.check("manage_skill", {"action": "delete", "name": canonical(name)})   # CONFIRM: EV asks out loud
-            if not res.allowed:
-                return {"deleted": False, "message": res.reason}
-            self.app.skills.delete(name)
-        except SkillError as e:
-            raise DashboardError(str(e)) from e
-        finally:
-            self.app._turn_lock.release()
-        return {"deleted": True}
 
     # ---- memory
     def facts(self) -> dict[str, Any]:

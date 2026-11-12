@@ -18,21 +18,16 @@ from ev.core.log import get_logger
 from ev.memory.store import MemoryStore
 from ev.memory.vault import Vault
 from ev.memory.vault_index import VaultIndex
-from ev.safety.gate import GateResult, SafetyGate, default_describe
+from ev.safety.gate import SafetyGate
 from ev.safety.provenance import (
     MEMORY_TOOLS,
     SOURCE_FAST,
     SOURCE_SAID,
     SOURCE_SAID_CONFIRMED,
-    SOURCE_SKILL,
     TurnState,
     escalation,
-    skill_escalation,
-    skill_unasked,
 )
 from ev.safety.untrusted import InjectionDetector, wrap_untrusted
-from ev.skills import runner as skill_runner
-from ev.skills.store import FORBIDDEN_STEP_TOOLS, Skill, SkillError, SkillStore, Step, canonical, clean_value
 from ev.tools.base import Tool, ToolRegistry, ToolResult, validate_args
 
 from .client import LLMError, OllamaClient, ToolCall
@@ -141,16 +136,12 @@ class Brain:
                  on_acting: Callable[[bool], None] | None = None,
                  now: Callable[[], dt.datetime] = dt.datetime.now,
                  vault: Vault | None = None, index: VaultIndex | None = None, turn: TurnState | None = None,
-                 context: ContextSnapshot | None = None, skills: SkillStore | None = None,
+                 context: ContextSnapshot | None = None,
                  selfinfo: SelfInfo | None = None):
         self.cfg = cfg
         self.context = context
         self.selfinfo = selfinfo
         self.page_load_s = float(cfg.get("screen", "page_load_s", 3.5))   # wait between "open the site" and "click the first video"
-        self.skills = skills
-        self.action_log: list[dict[str, Any]] = []         # successful calls, newest last: what "save that as ..." turns into a skill
-        self._skill_running = False
-        self.on_tools_changed: Callable[[], object] | None = None
         self.on_tool_result: Callable[[dict[str, Any]], object] | None = None      # the dashboard's window onto what the gate decided
         self.client = client
         self.memory = memory
@@ -192,9 +183,6 @@ class Brain:
         self._summary_lock = threading.Lock()
         self._warm_lock = threading.Lock()
         self._schema_tokens: tuple[list[dict[str, Any]], int] | None = None
-        if skills is not None:
-            skills.on_change = self._skills_changed
-            self.attach_skills()
 
     # ---- prompt building
     def system_prompt(self) -> str:
@@ -395,12 +383,11 @@ class Brain:
             on_sentence(self.rng.choice(_FILLERS))
 
         self.turn.begin_turn(user_text)
-        skill = self._match_skill(user_text) if allow_fast else None
-        if allow_fast and skill is None and (steps := match_compound(user_text)):
+        if allow_fast and (steps := match_compound(user_text)):
             done = self._run_compound(user_text, steps, filler)
             on_sentence(done.text)
             return done
-        forced = (skill or match_fast(user_text)) if allow_fast else None   # matched once: it serves the fast path and the forced call
+        forced = match_fast(user_text) if allow_fast else None   # matched once: it serves the fast path and the forced call
         if forced and forced.tool == "review_facts":
             reviewed = self._review_facts(user_text, filler)
             on_sentence(reviewed.text)
@@ -590,15 +577,6 @@ class Brain:
             return entry, None
         entry["args"] = clean
         reason = escalation(name, clean, source, self.turn, self.fact_overlap_min)
-        if reason is None and name == "run_skill" and self.skills is not None and (sk := self.skills.get(str(clean.get("name", "")))):
-            phrases = [re.sub(r"\{\w+\}", " ", p) for p in (sk.name, *sk.triggers)]
-            if skill_unasked(phrases, source, self.turn):
-                entry["message"] = "I didn't run that because you didn't ask for it."
-                entry["model_view"] = "DENIED: the user did not ask for that skill. Do not run it; just answer what they said."
-                entry["denied"] = True
-                self.gate._rec(name, clean, GateResult(False, "the user did not ask for it"))     # still on the audit list
-                return entry, None
-            reason = skill_escalation(phrases, source, self.turn)
         gr = self.gate.check(name, clean, escalate=reason, ask_allowed=ask)
         if not gr.allowed:
             entry["message"] = f"I can't do that: {gr.reason}."
@@ -626,9 +604,6 @@ class Brain:
             entry["message"] = "I found some results."
         else:
             entry["model_view"] = ("OK: " if res.ok else "FAILED: ") + res.message + (f"\n{res.hint}" if res.hint else "")
-        if res.ok and tool.name not in FORBIDDEN_STEP_TOOLS:
-            self.action_log.append({"tool": tool.name, "args": dict(entry["args"]), "t": time.time()})
-            del self.action_log[:-50]
 
     @contextlib.contextmanager
     def _filler_guard(self, names: list[str], filler: Callable[[], None] | None) -> Iterator[None]:
@@ -728,165 +703,6 @@ class Brain:
         out.timings["total"] = time.perf_counter() - t0
         self._remember_turn(text, msg)
         return out
-
-    # ---- skills (ev/skills): named routines made of ordinary tool calls
-    def _match_skill(self, text: str) -> FastMatch | None:
-        """The whole sentence is one of a skill's trigger phrases (the user's own words, so the fast path)."""
-        if self.skills is None or "run_skill" not in self.registry.names() or not (found := self.skills.match(text)):
-            return None
-        skill, said = found
-        args: dict[str, Any] = {"name": skill.name}
-        if said:
-            args["options"] = "; ".join(f"{k}={v.replace(';', ' ').replace('=', ' ')}" for k, v in said.items())
-        return FastMatch("run_skill", args, "skill", then_llm=skill.reads_outside)     # a skill that read the web/screen gets phrased by the model
-
-    def attach_skills(self) -> None:
-        """(Re-)register the skill tools. run_skill's list of names is part of the tool schema, so when the skill list changes
-        the schema changes and the prompt cache is re-primed once (not per turn). save_skill and manage_skill are voice-only:
-        a skill is a standing automation, so the model cannot create or change one."""
-        assert self.skills is not None
-        s = "string"
-        names = self.skills.names()
-        if names:
-            self.registry.register(Tool(
-                "run_skill", "Run a saved routine, only when the user asks for it by name. options: a value they gave, like music=jazz.",
-                {"name": {"type": s, "enum": names}, "options": {"type": s, "maxLength": 200}},
-                self._tool_run_skill, ("name",), timeout_s=180))
-        else:
-            self.registry.unregister("run_skill")
-        self.registry.register(Tool("save_skill", "Save what was just done as a routine.", {"name": {"type": s, "maxLength": 40}},
-                                    self._tool_save_skill, ("name",), direct=True, llm_visible=False))
-        self.registry.register(Tool(
-            "manage_skill", "Add a phrase to, rename, delete or list routines.",
-            {"action": {"type": s, "enum": ["add_trigger", "rename", "delete", "list"]}, "name": {"type": s, "maxLength": 40},
-             "value": {"type": s, "maxLength": 60}}, self._tool_manage_skill, ("action",), direct=True, llm_visible=False))
-        self.gate.describers["manage_skill"] = lambda a: (f"delete the skill {a.get('name', '')}" if a.get("action") == "delete"
-                                                          else default_describe("manage_skill", a))
-
-    def _skills_changed(self) -> None:
-        self.attach_skills()
-        if self.on_tools_changed:
-            self.on_tools_changed()
-
-    def _skill_step(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        """One step of a skill: validated, gated (a risky step asks out loud) and provenance-checked like any other call."""
-        if tool in FORBIDDEN_STEP_TOOLS:
-            return {"tool": tool, "args": args, "ok": False, "denied": True, "message": "I can't do that: a skill can't use that."}
-        return self._execute(tool, args, None, source=SOURCE_SKILL)
-
-    def run_skill_proactive(self, name: str) -> str | None:
-        """A proactive rule asks for a skill (nobody spoke just now). Every step still goes through the gate, but a step that
-        would need a spoken yes is refused rather than asked, because EV doesn't start a question on its own. Returns what to
-        say: the skill's own line, or the model's short phrasing of data the skill fetched from outside; None for nothing."""
-        skill = self.skills.get(name) if self.skills is not None else None
-        if skill is None:
-            log.warning("proactive rule names a skill that doesn't exist: %r", name)
-            return None
-        if not self.gate.check("run_skill", {"name": skill.name}, ask_allowed=False).allowed:
-            return None
-        rep = skill_runner.run(skill, self.skills.values_for(skill, {}) if self.skills else {},
-                               lambda t, a: self._execute(t, a, None, source=SOURCE_SKILL, ask=False),
-                               available=lambda t: self.registry.get(t) is not None)
-        if not rep.ok:
-            return rep.message                                    # "Stopped at step 2, ...": the user hears which one
-        return self.phrase_for_speech(rep.message, skill.instructions) if rep.outside else rep.message
-
-    def run_skill_for_user(self, name: str) -> tuple[bool, str]:
-        """The user pressed Run on a skill in the dashboard. Same steps, same gate as saying its name; a step that needs a
-        yes still asks out loud. Returns (ok, what to show)."""
-        skill = self.skills.get(name) if self.skills is not None else None
-        if skill is None or self.skills is None:
-            return False, f"There is no skill called {name}."
-        if not self.gate.check("run_skill", {"name": skill.name}).allowed:
-            return False, "Not allowed."
-        rep = skill_runner.run(skill, self.skills.values_for(skill, {}),
-                               lambda t, a: self._execute(t, a, None, source=SOURCE_SKILL),
-                               available=lambda t: self.registry.get(t) is not None)
-        return rep.ok, rep.message
-
-    def phrase_for_speech(self, data: str, guidance: str = "") -> str | None:
-        """One model call, no tools: say fetched text (web, notes, calendar) as a short spoken update. The text goes in wrapped
-        as data, and with no tools offered the model can only talk, so nothing in it can make anything happen."""
-        wrapped, _flags = wrap_untrusted(data, "skill", self.detector, 2500)
-        ask = ("Say a short spoken update for the user from this data and nothing else. " + guidance).strip() + "\n\n" + wrapped
-        try:
-            reply = self.client.chat([{"role": "system", "content": self.system_prompt()}, {"role": "user", "content": ask}],
-                                     options={"num_predict": int(self.cfg["llm"]["num_predict"])})
-        except LLMError as e:
-            log.warning("could not phrase a proactive update: %s", e)
-            return None
-        splitter = SentenceSplitter(self.first_chunk_min, 0)
-        sentences = [s for s in [*splitter.feed(reply.text), *splitter.flush()] if s.strip()][:3]
-        return " ".join(t for s in sentences if (t := spoken_text(s)) and not self._names_a_tool(t)) or None
-
-    @staticmethod
-    def _parse_options(skill: Skill, options: str) -> dict[str, str]:
-        """"music=jazz; volume=40", or just "jazz" for a skill with a single parameter. Unknown names are ignored."""
-        out: dict[str, str] = {}
-        for piece in (p for p in re.split(r";\s*", options) if p.strip()):
-            key, sep, val = piece.partition("=")
-            if sep and key.strip() in skill.params:
-                out[key.strip()] = clean_value(val)
-            elif not sep and len(skill.params) == 1:
-                out[next(iter(skill.params))] = clean_value(piece)
-        return out
-
-    def _tool_run_skill(self, name: str, options: str = "") -> ToolResult:
-        assert self.skills is not None
-        if self._skill_running:
-            return ToolResult(False, "A skill can't start another skill.")
-        skill = self.skills.get(name)
-        if skill is None:
-            return ToolResult(False, f"I don't have a skill called {name}.")
-        values = self.skills.values_for(skill, self._parse_options(skill, options))
-        self._skill_running = True
-        try:
-            rep = skill_runner.run(skill, values, self._skill_step, available=lambda t: self.registry.get(t) is not None)
-        finally:
-            self._skill_running = False
-        self.skills.last = skill.name
-        return ToolResult(rep.ok, rep.message, {"steps": rep.done}, untrusted=rep.outside, source="skill", hint=skill.instructions)
-
-    def _tool_save_skill(self, name: str) -> ToolResult:
-        """"Save that as work mode": the last few successful calls (from this session's action log, within a time window)
-        become the steps. Memory and skill tools are left out. The user hears the steps read back."""
-        assert self.skills is not None
-        cutoff = time.time() - float(self.cfg.get("skills", "save_window_min", 15)) * 60
-        steps: list[Step] = []
-        for a in self.action_log:
-            if a["t"] >= cutoff and a["tool"] not in FORBIDDEN_STEP_TOOLS and (not steps or (steps[-1].tool, steps[-1].args) != (a["tool"], a["args"])):
-                steps.append(Step(a["tool"], dict(a["args"])))
-        steps = steps[-int(self.cfg.get("skills", "save_max_steps", 6)):]
-        if not steps:
-            return ToolResult(False, "I haven't done anything lately that I could save.")
-        nm = canonical(name)
-        try:
-            skill = self.skills.save(Skill(nm, f"Saved on {self.now():%B} {self.now().day}", [nm], steps))
-        except SkillError as e:
-            return ToolResult(False, str(e))
-        self.action_log.clear()                                 # the next "save that" starts from what happens after this
-        said = ", then ".join(self.gate.describe(s.tool, s.args) for s in skill.steps)
-        return ToolResult(True, f"Saved {skill.name}. It will {said}. Say {skill.name} to run it, or tell me another phrase for it.")
-
-    def _tool_manage_skill(self, action: str, name: str = "", value: str = "") -> ToolResult:
-        assert self.skills is not None
-        try:
-            if action == "list":
-                names = self.skills.names()
-                return ToolResult(True, "You don't have any skills yet." if not names else
-                                  f"You have {len(names)} skill{'s' if len(names) != 1 else ''}: {', '.join(names)}.")
-            if action == "add_trigger":
-                sk = self.skills.add_trigger(name, value)
-                return ToolResult(True, f"Okay, saying {canonical(value)} now starts {sk.name}.")
-            if action == "rename":
-                sk = self.skills.rename(name, value)
-                return ToolResult(True, f"Renamed it to {sk.name}.")
-            if action == "delete":
-                self.skills.delete(name)
-                return ToolResult(True, f"Deleted {canonical(name)}.")
-        except SkillError as e:
-            return ToolResult(False, str(e))
-        return ToolResult(False, "I don't know how to do that to a skill.")
 
     # ---- memory
     def _remember_turn(self, user: str, reply: str, tool_log: list[dict[str, Any]] | None = None) -> None:

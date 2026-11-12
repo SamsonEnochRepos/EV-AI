@@ -54,8 +54,8 @@ window.addEventListener("pointermove", (e) => {
 });
 
 // ---- tabs
-const loaders = { live: loadLive, settings: loadSettings, voice: loadVoice, skills: loadSkills, memory: loadMemory, policy: loadPolicy };
-const TITLES = { live: "Live", settings: "Settings", voice: "Voice & model", skills: "Skills", memory: "Memory", policy: "Policy" };
+const loaders = { live: loadLive, settings: loadSettings, voice: loadVoice, memory: loadMemory, policy: loadPolicy };
+const TITLES = { live: "Live", settings: "Settings", voice: "Voice & model", memory: "Memory", policy: "Policy" };
 document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll("#tabs button").forEach((x) => x.classList.toggle("on", x === b));
   for (const name of Object.keys(loaders)) $("tab-" + name).hidden = name !== b.dataset.tab;
@@ -134,7 +134,6 @@ function loadLive() {
   const isOrb = currentView === "orb";
   el.append(h("div", { class: "hud" },
     h("div", { class: "col left" },
-      h("div", { class: "panel" }, h("h2", {}, "Skills"), h("div", { class: "skill-list", id: "skilllist" })),
       h("div", { class: "panel", id: "side" })),
     h("div", { class: "col" },
       h("div", { class: "panel orb-panel" },
@@ -162,8 +161,7 @@ function loadLive() {
         h("div", { class: "tiles", id: "tiles" })),
       h("div", { class: "panel" }, h("h2", {}, "What EV did"), h("table", {}, h("tbody", { id: "toolrows" })))),
     h("div", { class: "col" },
-      h("div", { class: "panel" }, h("h2", {}, "Live feed"), h("div", { class: "feed", id: "feed" })),
-      h("div", { class: "panel" }, h("h2", {}, "Spoke up on its own"), h("div", { id: "proactive" })))));
+      h("div", { class: "panel" }, h("h2", {}, "Live feed"), h("div", { class: "feed", id: "feed" })))));
   if (isOrb) {
     EVOrb.mount($("orb"));
   } else {
@@ -171,20 +169,8 @@ function loadLive() {
   }
   renderFeed();
   renderTools();
-  renderEvents();
-  guard(loadSkillList)();
+  
   return refreshStatus();
-}
-async function loadSkillList() {
-  const d = await api("/api/skills");
-  const box = $("skilllist");
-  if (!box) return;
-  clear(box);
-  for (const s of d.skills) {
-    box.append(h("div", { class: "skill-item" }, h("span", { class: "name" }, s.name, s.description ? h("span", { class: "desc" }, s.description) : null),
-      h("button", { onclick: guard(async () => { say(`Running ${s.name}…`); const r = await api("/api/skills/run", { name: s.name }); say(r.message, r.ok ? "info" : "error"); }) }, "Run")));
-  }
-  if (!d.skills.length) box.append(h("p", { class: "empty" }, "No skills yet. Say “save that as …” after doing something."));
 }
 function pushFeed(kind, tag, text, at, key) {
   const id = key || `${kind}:${at}:${text}`;
@@ -214,13 +200,6 @@ function renderTools() {
   if (!tools.length) body.append(h("tr", {}, h("td", { class: "muted" }, "No tool calls yet.")));
   renderTiles();
 }
-function renderEvents() {
-  const box = $("proactive");
-  if (!box) return;
-  clear(box);
-  for (const e of events.slice(-8).reverse()) box.append(h("p", {}, `${e.rule || e.name || "rule"}: `, h("span", { class: "muted" }, e.text || e.action || "")));
-  if (!events.length) box.append(h("p", { class: "empty" }, "Nothing."));
-}
 function renderTiles() {
   const box = $("tiles");
   if (!box) return;
@@ -243,13 +222,6 @@ function renderSide() {
   for (const t of status.timers || []) el.append(h("p", {}, `${t.label || "timer"}: ${Math.floor(t.seconds_left / 60)}m ${t.seconds_left % 60}s left`));
   for (const r of status.reminders || []) el.append(h("p", {}, `${r.text} `, h("span", { class: "muted" }, new Date(r.due * 1000).toLocaleString())));
   if (!(status.timers || []).length && !(status.reminders || []).length) el.append(h("p", { class: "empty" }, "None."));
-  if (status.proactive) {
-    el.append(h("h2", {}, "Speaking up"));
-    el.append(h("p", { class: "muted" }, status.proactive.snoozed_min ? `Quiet for ${status.proactive.snoozed_min} more minutes.` : `${status.proactive.rules} rules active.`));
-    const mins = h("select", {}, [["30", "30 min"], ["60", "1 hour"], ["180", "3 hours"], ["0", "Resume"]].map(([v, t]) => h("option", { value: v }, t)));
-    el.append(h("div", { class: "row" }, mins, h("button", { onclick: guard(async () => { await api("/api/snooze", { minutes: Number(mins.value) }); await refreshStatus(); }) }, "Quiet")));
-    for (const p of status.proactive.problems) el.append(h("p", { class: "muted" }, p));
-  }
   if (status.vault && status.vault.unconfirmed) el.append(h("p", { class: "confirm" }, `${status.vault.unconfirmed} unconfirmed fact(s): see Memory.`));
 }
 function connect() {
@@ -273,14 +245,6 @@ function connect() {
     tools.push(d);
     renderTools();
     pushFeed("tool " + (d.decision || ""), `Tool · ${d.decision || ""}`, `${d.tool}${d.args ? " " + Object.values(d.args).join(", ").slice(0, 80) : ""}`, d.at, key + ":f");
-  });
-  on("proactive", (d) => {
-    const key = `pro:${d.at}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    events.push(d);
-    renderEvents();
-    pushFeed("proactive", "Spoke up", d.text || d.what || d.rule || "", d.at, key + ":f");
   });
   es.onerror = () => { document.body.dataset.conn = "off"; $("online").textContent = "OFFLINE"; setState("offline"); };
 }
@@ -343,44 +307,6 @@ async function loadVoice() {
       " ", h("button", { onclick: guard(async () => { await api("/api/model", { model: x.name, save: true }); say(`Saved ${x.name}.`); await refreshStatus(); loadVoice(); }) }, "Use and save"))));
   el.append(h("div", { class: "card" }, h("h2", {}, "Chat model"), h("table", {}, h("tbody", {}, rows)),
     h("p", { class: "muted" }, "Switching reloads the model; the first reply afterwards may be slow. Persona and tool calling were tuned on qwen2.5:3b.")));
-}
-
-// ---- skills
-async function loadSkills() {
-  const d = await api("/api/skills");
-  const el = $("tab-skills");
-  clear(el);
-  for (const p of d.problems) el.append(h("div", { class: "card confirm" }, p));
-  for (const s of d.skills) {
-    el.append(h("div", { class: "card" }, h("h2", {}, s.name), h("p", { class: "muted" }, s.description),
-      h("p", {}, "Say: ", s.triggers.join(" · ")),
-      h("ol", {}, s.steps.map((x) => h("li", {}, `${x.tool} ${JSON.stringify(x.args)}${x.optional ? " (optional)" : ""}`))),
-      h("div", { class: "row" },
-        h("button", { onclick: guard(async () => { say("Running…"); const r = await api("/api/skills/run", { name: s.name }); say(r.message, r.ok ? "info" : "error"); }) }, "Run"),
-        h("button", { onclick: () => edit(s, d.tools) }, "Edit"),
-        h("button", { class: "danger", onclick: guard(async () => {
-          say("EV will ask you out loud to confirm.");
-          const r = await api("/api/skills/delete", { name: s.name });
-          say(r.deleted ? "Deleted." : (r.message || "Not deleted."), r.deleted ? "info" : "error"); loadSkills();
-        }) }, "Delete"))));
-  }
-  el.append(h("div", { class: "row" }, h("button", { onclick: () => edit({ name: "", description: "", triggers: [], say: "", params: {}, steps: [{ tool: "", args: {} }] }, d.tools) }, "New skill")),
-    h("div", { id: "editor" }));
-}
-function edit(s, tools) {
-  const box = $("editor");
-  clear(box);
-  const isNew = !s.name;
-  const text = h("textarea", {}, JSON.stringify({ name: s.name, description: s.description, triggers: s.triggers, say: s.say, params: s.params, steps: s.steps }, null, 2));
-  box.append(h("div", { class: "card" }, h("h2", {}, isNew ? "New skill" : `Edit ${s.name}`),
-    h("p", { class: "muted" }, "Steps are ordinary tool calls and each one is checked by the safety gate when it runs. Tools: " + tools.join(", ")),
-    text, h("div", { class: "row" }, h("button", { class: "primary", onclick: guard(async () => {
-      let spec;
-      try { spec = JSON.parse(text.value); } catch { throw new Error("That isn't valid JSON."); }
-      if (!isNew && spec.name !== s.name) throw new Error("To rename a skill, say “rename skill …” to EV.");
-      await api("/api/skills/save", spec); say("Saved."); loadSkills();
-    }) }, "Save"), h("button", { onclick: () => clear(box) }, "Cancel"))));
-  box.scrollIntoView();
 }
 
 // ---- memory

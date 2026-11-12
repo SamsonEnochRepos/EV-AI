@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 MEMORY_TOOLS = frozenset({"remember_fact", "forget_fact"})
 
 SOURCE_FAST = "fast_path"
-SOURCE_SKILL = "skill"        # a step of a skill: gated like any call, and it is not "the user's own words" for memory purposes
 
 # What a fact's `source` says (kept in the vault line for people and in SQLite for EV). Set by the system, never the model.
 SOURCE_SAID = "user said"
@@ -25,7 +24,6 @@ SOURCE_KEPT = "user confirmed"
 
 REASON_UNTRUSTED = "that came from something I read, not from you"
 REASON_NOT_SAID = "you didn't say that"
-REASON_NOT_ASKED = "you didn't ask for it"
 
 _STOP = frozenset("""a an the and or but if of to in on at by for with from as is are was were be been am it its this that these
 those i me my mine we our you your he she they them his her their there here so do does did have has had will would can could
@@ -61,27 +59,6 @@ class TurnState:
         self.utterances.append(user_text)
         self.untrusted_seen = False
         self.call_source = ""
-
-
-def skill_unasked(phrases: list[str], source: str, turn: TurnState) -> bool:
-    """A model-made run_skill with no word in common with anything the user said: almost certainly a mistake, so it is refused
-    outright rather than turned into a question about something the user never mentioned."""
-    if source in (SOURCE_FAST, SOURCE_SKILL):
-        return False
-    return max((overlap(p, turn.utterances) for p in phrases), default=0.0) == 0.0
-
-
-def skill_escalation(phrases: list[str], source: str, turn: TurnState, min_overlap: float = 0.5) -> str | None:
-    """A model-made run_skill: silent only if the user said (most of) the skill's name or one of its trigger phrases and nothing
-    from outside was read this turn. A 3B model reaches for a tool with a list of names on small talk ("tell me a joke" ran
-    'wind down' in 5 of 6 trials), and a skill is a bundle of side effects. The user's own phrase (fast path) needs no check."""
-    if source == SOURCE_FAST or source == SOURCE_SKILL:
-        return None
-    if turn.untrusted_seen:
-        return REASON_UNTRUSTED
-    if max((overlap(p, turn.utterances) for p in phrases), default=0.0) < min_overlap:
-        return REASON_NOT_ASKED
-    return None
 
 
 def escalation(tool: str, args: dict[str, object], source: str, turn: TurnState, min_overlap: float) -> str | None:

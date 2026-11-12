@@ -69,12 +69,6 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("context.recent_files", "bool", "...files that just appeared", live=True),
     Setting("context.battery", "bool", "...battery", live=True),
     Setting("context.git", "bool", "...git branch", live=True),
-    # how much she may speak up on her own (the rules themselves stay in config/proactive.toml)
-    Setting("proactive.max_spoken_per_hour", "int", "Most spoken interruptions per hour", 0, 20, True),
-    Setting("proactive.quiet_start", "time", "Quiet hours start", live=True),
-    Setting("proactive.quiet_end", "time", "Quiet hours end", live=True),
-    Setting("proactive.max_idle_s", "int", "Stay quiet if I've been away (s)", 60, 86400, True),
-    Setting("proactive.defer_minutes", "float", "Drop a held-back line after (min)", 0, 120, True),
 )
 
 ALLOWED: dict[str, Setting] = {s.key: s for s in SETTINGS}

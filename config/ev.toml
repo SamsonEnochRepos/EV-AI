@@ -160,32 +160,12 @@ daily_summaries = true         # append the rolling conversation summary to EV/D
 auto_recall = false            # true = put up to auto_recall_k wrapped snippets from your notes in each request. Off: not measured with a real vault
 auto_recall_k = 2
 
-[proactive]
-# EV speaking up on its own (low battery, a long build finished, the morning brief...). Rules and guards live in
-# config/proactive.toml. "quiet for an hour" snoozes the spoken lines. Off here = EV only ever answers.
-enabled = true
-rules_file = "config/proactive.toml"
-# The dashboard can tune these guards (and writes them to ev.local.toml). They only ever override the [guards] table of the rules
-# file, and only within its limits. Leave them out to use the rules file's own values.
-# max_spoken_per_hour = 4
-# quiet_start = "22:30"
-# quiet_end = "07:30"
-# max_idle_s = 1800
-# defer_minutes = 10
-
 [dashboard]
 # A local page for watching EV and changing how it feels: http://127.0.0.1:<port>, opened by saying "open the dashboard" or from the
 # tray. Loopback only; every visit needs a one-time sign-in link EV opens for you. It cannot change policy.toml or anything that
 # widens what EV can reach (see docs/SECURITY.md). Off here = no listener at all.
 enabled = true
 port = 0                       # 0 = pick a free port each start
-
-[skills]
-# Routines made of ordinary tool calls, one TOML file each (see skills/work_mode.toml). Every step goes through the safety gate
-# on its own. "save that as <name>" turns the last few things you did into a new one; the model cannot create or change skills.
-dir = "skills"                 # EV may write new skill files here (policy.toml write_dirs {skills}), nowhere else
-save_window_min = 15           # "save that as ..." looks at what worked in the last this-many minutes...
-save_max_steps = 6             # ...and keeps at most this many of the newest steps
 
 [context]
 # A few lines about what is going on, put beside your request (never in the system prompt, so the prompt cache is untouched).

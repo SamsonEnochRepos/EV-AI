@@ -10,7 +10,6 @@ How it is locked down (see docs/SECURITY.md):
 * The page is static, served with a strict Content-Security-Policy (no inline script, no external anything), and it puts
   every piece of text into the page as text, never as markup.
 * There is no route that writes policy.toml or any file other than ev.local.toml (through the allow-list in settings_schema)
-  and the skills folder (through SkillStore).
 """
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ STATIC = Path(__file__).parent / "static"
 FILES = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
          "/app.css": ("app.css", "text/css; charset=utf-8"), "/orb.js": ("orb.js", "text/javascript; charset=utf-8"),
          "/face.js": ("face.js", "text/javascript; charset=utf-8")}
-REPLAY = ("state", "turn", "tool", "proactive")      # what a page that has just connected is caught up on (never audio levels)
+REPLAY = ("state", "turn", "tool")      # what a page that has just connected is caught up on (never audio levels)
 MAX_BODY = 64 * 1024
 TOKEN_TTL_S = 120
 COOKIE = "ev_dash"
@@ -73,11 +72,6 @@ class Backend(Protocol):
     def set_voice(self, engine: str, voice: str, speed: float, preview: bool, save: bool) -> dict[str, Any]: ...
     def models(self) -> dict[str, Any]: ...
     def set_model(self, model: str, save: bool) -> dict[str, Any]: ...
-    def snooze(self, minutes: float) -> dict[str, Any]: ...
-    def skills(self) -> dict[str, Any]: ...
-    def run_skill(self, name: str) -> dict[str, Any]: ...
-    def save_skill(self, spec: dict[str, Any]) -> dict[str, Any]: ...
-    def delete_skill(self, name: str) -> dict[str, Any]: ...
     def facts(self) -> dict[str, Any]: ...
     def search(self, query: str, when: str) -> dict[str, Any]: ...
     def forget(self, key: str) -> dict[str, Any]: ...
@@ -220,7 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
         routes: dict[str, Callable[[], dict[str, Any]]] = {
             "/api/status": self.owner.backend.status, "/api/settings": self.owner.backend.settings,
             "/api/voices": self.owner.backend.voices, "/api/models": self.owner.backend.models,
-            "/api/skills": self.owner.backend.skills, "/api/facts": self.owner.backend.facts,
+            "/api/facts": self.owner.backend.facts,
             "/api/policy": self.owner.backend.policy_text}
         if url.path in routes:
             return self._call(routes[url.path])
@@ -298,10 +292,6 @@ class _Handler(BaseHTTPRequestHandler):
             "/api/voice": lambda: b.set_voice(str(body.get("engine", "")), str(body.get("voice", "")), _num(body.get("speed", 1.0)),
                                               bool(body.get("preview", False)), bool(body.get("save", False))),
             "/api/model": lambda: b.set_model(str(body.get("model", "")), bool(body.get("save", False))),
-            "/api/snooze": lambda: b.snooze(_num(body.get("minutes", 0))),
-            "/api/skills/run": lambda: b.run_skill(str(body.get("name", ""))),
-            "/api/skills/save": lambda: b.save_skill(body),
-            "/api/skills/delete": lambda: b.delete_skill(str(body.get("name", ""))),
             "/api/forget": lambda: b.forget(str(body.get("key", ""))),
             "/api/keep": lambda: b.keep(str(body.get("id", ""))),
         }

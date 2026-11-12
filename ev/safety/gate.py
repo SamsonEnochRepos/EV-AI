@@ -104,8 +104,6 @@ def default_describe(tool: str, args: dict[str, Any]) -> str:
         return f"open {args.get('name', 'that app')}"
     if tool == "open_website":
         return "open " + (args.get("url") or f"{args.get('site', 'a website')} searching for {args.get('query')}")
-    if tool == "run_skill":
-        return f"run the skill {args.get('name', '')}"
     if tool == "remember_fact":
         about = f"{args['about']}'s " if args.get("about") else ""
         return f"remember that {about}{args.get('key', 'that')} is {args.get('value', '')}"

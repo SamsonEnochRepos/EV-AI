@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
-import shutil
 import threading
 import tomllib
 from pathlib import Path
@@ -23,11 +22,9 @@ from ev.dashboard.server import FILES, MAX_BODY, TOKEN_TTL_S, DashboardError, Da
 from ev.dashboard.settings_schema import ALLOWED, SettingError, coerce
 from ev.memory.store import MemoryStore
 from ev.safety.policy import Policy
-from ev.skills.store import SkillStore
 from ev.tools.base import Tool, ToolRegistry, ToolResult
 
 from .fakes import text_reply
-from .test_skills import Rig
 
 # ---------------------------------------------------------------- a server with a fake backend
 
@@ -253,9 +250,9 @@ def test_the_hub_never_blocks_on_a_browser_that_stopped_reading():
 
 def test_an_event_cannot_overwrite_its_own_kind():
     hub = Hub()
-    hub.publish("proactive", kind="spoken", at="x")
-    last = hub.recent()["proactive"][-1]
-    assert last["kind"] == "proactive" and isinstance(last["at"], float)
+    hub.publish("tool", kind="spoken", at="x")
+    last = hub.recent()["tool"][-1]
+    assert last["kind"] == "tool" and isinstance(last["at"], float)
 
 
 # ---------------------------------------------------------------- settings: an allow-list, written to ev.local.toml only
@@ -285,9 +282,9 @@ def make_app(cfg: Config, tmp_path: Path, **over: Any) -> SimpleNamespace:
         display_mode=False, memory=MemoryStore(tmp_path / "m.sqlite"), scheduler=SimpleNamespace(active_timers=lambda: []),
         client=SimpleNamespace(model="qwen2.5:3b", opts={"temperature": 0.6}, http=None),
         brain=SimpleNamespace(max_sentences=2, max_sentences_detail=6, filler_after_s=1.3, refresh_prompt_cache=lambda: True),
-        speaker=FakeSpeaker(), overlay=SimpleNamespace(send_display=lambda _e: None), proactive=None, vault=None, index=None,
+        speaker=FakeSpeaker(), overlay=SimpleNamespace(send_display=lambda _e: None), vault=None, index=None,
         context=SimpleNamespace(enabled=True, on={"foreground": True, "recent_files": True, "battery": True, "git": True, "calendar": True}),
-        skills=SimpleNamespace(problems=[]), _turn_lock=threading.Lock(), toggle_pause=lambda: None, toggle_mute=lambda: None,
+        _turn_lock=threading.Lock(), toggle_pause=lambda: None, toggle_mute=lambda: None,
         kill=lambda: None)
     for k, v in over.items():
         setattr(ns, k, v)
@@ -334,7 +331,7 @@ def test_a_setting_that_is_not_listed_is_refused_and_nothing_is_written(backend,
 @pytest.mark.parametrize("key,value", [("llm.reply_max_sentences", 99), ("llm.reply_max_sentences", 0), ("llm.reply_max_sentences", True),
                                        ("llm.reply_max_sentences", "3"), ("llm.temperature", float("nan")), ("llm.temperature", float("inf")),
                                        ("conversation.followup_window_s", -1), ("context.git", 1), ("context.git", "yes"),
-                                       ("proactive.quiet_start", "25:00"), ("proactive.quiet_start", "22:30; rm"), ("proactive.quiet_start", 2230)])
+                                       ("context.git", 2)])
 def test_values_outside_their_type_or_range_are_refused(key, value):
     with pytest.raises(SettingError):
         coerce(key, value)
@@ -344,7 +341,7 @@ def test_ints_stay_ints_and_floats_stay_floats():
     assert isinstance(coerce("llm.reply_max_sentences", 3.0), int) and isinstance(coerce("llm.temperature", 1), float)
 
 
-SAFE_SECTIONS = {"conversation", "trigger", "llm", "tts", "overlay", "context", "proactive"}
+SAFE_SECTIONS = {"conversation", "trigger", "llm", "tts", "overlay", "context"}
 WIDENING = {"path", "dir", "file", "host", "port", "url", "repos", "source", "token", "trusted", "allow", "block", "policy", "builder",
             "hotkey", "model", "engine", "device", "key", "password", "rules"}          # whole words of a key's name (split on _)
 NOT_WIDENING = {"overlay.display_mode", "context.enabled"}                       # EV's own text card / a switch for a read-only look
@@ -390,10 +387,10 @@ def test_the_widening_guard_catches_a_key_that_slips_in(key):
 def test_the_local_file_keeps_other_keys_backs_up_once_and_survives_awkward_values(tmp_path):
     f = tmp_path / "ev.local.toml"
     f.write_text('[general]\nname = "x\\"y"\n\n[llm]\nmodel = "m"\n', encoding="utf-8")
-    localconf.update(f, {"llm.temperature": 0.3, "proactive.quiet_start": "21:00"})
+    localconf.update(f, {"llm.temperature": 0.3, "conversation.followup_window_s": 5.0})
     localconf.update(f, {"llm.temperature": 0.4})
     data = tomllib.loads(f.read_text(encoding="utf-8"))
-    assert data == {"general": {"name": 'x"y'}, "llm": {"model": "m", "temperature": 0.4}, "proactive": {"quiet_start": "21:00"}}
+    assert data == {"general": {"name": 'x"y'}, "llm": {"model": "m", "temperature": 0.4}, "conversation": {"followup_window_s": 5.0}}
     assert "model = \"m\"" in (tmp_path / "ev.local.toml.bak").read_text(encoding="utf-8")
 
 
@@ -404,28 +401,6 @@ def test_a_broken_save_leaves_the_old_file(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         localconf.update(f, {"llm.temperature": 0.9})
     assert tomllib.loads(f.read_text(encoding="utf-8")) == {"llm": {"temperature": 0.5}}
-
-
-def test_proactive_guards_are_tuned_by_the_settings_and_stay_in_range(tmp_path):
-    from dataclasses import replace
-
-    from ev.proactive.rules import Guards, apply_overrides
-
-    g, problems = apply_overrides(Guards(), {"max_spoken_per_hour": 2, "quiet_start": "21:00", "defer_minutes": 5})
-    assert (g.max_spoken_per_hour, g.quiet_hours, g.defer_minutes, problems) == (2, ("21:00", "07:30"), 5.0, [])
-    g, problems = apply_overrides(replace(Guards(), max_spoken_per_hour=3), {"max_spoken_per_hour": 9999, "quiet_end": "late"})
-    assert g.max_spoken_per_hour == 3 and g.quiet_hours == ("22:30", "07:30") and len(problems) == 2
-
-
-def test_proactive_settings_apply_live_to_the_running_engine(cfg, tmp_path):
-    from ev.proactive.rules import Guards
-
-    engine = SimpleNamespace(guards=Guards())
-    app = make_app(cfg, tmp_path, proactive=engine)
-    be = AppBackend(app, tmp_path / "ev.local.toml")      # type: ignore[arg-type]
-    be.apply_settings({"proactive.max_spoken_per_hour": 1, "proactive.quiet_start": "20:00"})
-    assert engine.guards.max_spoken_per_hour == 1 and engine.guards.quiet_hours == ("20:00", "07:30")
-    app.memory.close()
 
 
 # ---------------------------------------------------------------- voice and model
@@ -473,84 +448,6 @@ def test_choosing_a_chat_model_checks_the_list_and_warns_about_size(backend):
         backend.set_model("evil:latest", True)
     backend.set_model("llama3.1:8b", False)
     assert backend.app.client.model == "llama3.1:8b" and not backend.local_file.exists()
-
-
-# ---------------------------------------------------------------- skills and memory go through the gate
-
-@pytest.fixture
-def skills_rig(cfg, tmp_path):
-    sdir = tmp_path / "skills"
-    shutil.copytree(ROOT / "skills", sdir)
-    pol = Policy.load(ROOT / "config" / "policy.toml", places={"skills": sdir, "vault_ev": tmp_path / "v", "screenshots": tmp_path / "s"})
-    store = SkillStore(sdir, pol)
-    store.load()
-    return lambda answer=False: _skills_backend(cfg, pol, store, tmp_path, answer)
-
-
-def _skills_backend(cfg, pol, store, tmp_path, answer):
-    rig = Rig(cfg, pol, store, [text_reply("unused")], answer)
-    app = make_app(cfg, tmp_path, brain=rig.brain, gate=rig.gate, skills=store, registry=rig.brain.registry)
-    return rig, store, AppBackend(app, tmp_path / "ev.local.toml")      # type: ignore[arg-type]
-
-
-def test_running_a_skill_from_the_dashboard_gates_every_step(skills_rig):
-    rig, _store, be = skills_rig()
-    out = be.run_skill("work mode")
-    assert out["ok"] and rig.tools() == ["open_app", "open_website"]
-    assert [e["tool"] for e in rig.gate.audit] == ["run_skill", "open_app", "open_website"]
-
-
-def test_a_risky_step_in_a_dashboard_run_still_asks_out_loud(skills_rig):
-    from ev.skills.store import Skill, Step
-
-    rig, store, be = skills_rig(answer=False)
-    store.save(Skill("tidy", "d", ["tidy up"], [Step("set_volume", {"level": 10}), Step("close_app", {"name": "chrome", "force": True})]))
-    out = be.run_skill("tidy")
-    assert not out["ok"] and rig.asked == ["force close chrome. Anything unsaved in it will be lost"] and rig.tools() == ["set_volume"]
-
-
-def test_a_blocked_step_cannot_be_run_through_the_dashboard_either(skills_rig):
-    from ev.skills.store import Skill, Step
-
-    rig, store, be = skills_rig(answer=True)
-    store.save(Skill("sneaky", "d", ["sneaky"], [Step("open_app", {"name": "cmd.exe"})]))
-    out = be.run_skill("sneaky")
-    assert not out["ok"] and rig.tools() == [] and "not allowed" in out["message"]
-
-
-def test_a_dashboard_run_waits_if_a_conversation_is_going_on(skills_rig):
-    rig, _s, be = skills_rig()
-    be.app._turn_lock.acquire()
-    with pytest.raises(DashboardError) as e:
-        be.run_skill("work mode")
-    assert e.value.status == 409 and rig.tools() == []
-
-
-def test_deleting_a_skill_needs_a_spoken_yes(skills_rig):
-    rig, store, be = skills_rig(answer=False)
-    assert be.delete_skill("work mode")["deleted"] is False and store.get("work mode") is not None
-    assert rig.asked and "work mode" in rig.asked[0]
-    rig2, store2, be2 = skills_rig(answer=True)
-    assert be2.delete_skill("work mode") == {"deleted": True} and store2.get("work mode") is None
-
-
-def test_saving_a_skill_from_the_dashboard_is_validated(skills_rig):
-    _rig, store, be = skills_rig()
-    ok = {"name": "quiet time", "description": "d", "triggers": ["quiet time"], "steps": [{"tool": "set_volume", "args": {"level": 5}}]}
-    assert be.save_skill(ok) == {"saved": "quiet time"} and store.get("quiet time") is not None
-    for bad in ({**ok, "name": "x/../y"}, {**ok, "steps": [{"tool": "run_skill", "args": {"name": "work mode"}}]},
-                {**ok, "steps": [{"tool": "remember_fact", "args": {"key": "a", "value": "b"}}]},
-                {**ok, "steps": [{"tool": "no_such_tool", "args": {}}]}, {**ok, "steps": []}, {**ok, "triggers": "nope"},
-                {**ok, "steps": [{"tool": "set_volume", "args": {"level": {"x": 1}}}]}):
-        with pytest.raises(DashboardError):
-            be.save_skill(bad)
-
-
-def test_a_skill_edit_cannot_pick_its_own_instructions_file(skills_rig):
-    _rig, store, be = skills_rig()
-    be.save_skill({"name": "work mode", "description": "d", "triggers": ["work mode"], "instructions": "../../secrets.md",
-                   "steps": [{"tool": "set_volume", "args": {"level": 5}}]})
-    assert (store.get("work mode").instructions_file or "") == ""
 
 
 class MemRig:
@@ -687,7 +584,7 @@ def test_the_real_app_serves_the_dashboard_and_open_dashboard_hands_out_a_workin
         status, _hdr, _ = b.request("GET", opened[0].split(str(app.dashboard.port), 1)[1], cookie=False)
         assert status == 302
         b.cookie = _hdr["set-cookie"].split(";", 1)[0]
-        for path in ("/api/status", "/api/settings", "/api/voices", "/api/skills", "/api/facts", "/api/policy"):
+        for path in ("/api/status", "/api/settings", "/api/voices", "/api/facts", "/api/policy"):
             code, _h, body = b.request("GET", path)
             assert code in (200, 503), (path, code, body)
         code, _h, body = b.request("GET", "/api/status")

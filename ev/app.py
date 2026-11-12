@@ -32,13 +32,9 @@ from ev.llm.selfinfo import TOPICS, SelfInfo
 from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.overlay.client import OverlayClient
-from ev.proactive.engine import Actions, ProactiveEngine
-from ev.proactive.probes import Probes
-from ev.proactive.rules import apply_overrides, load_rules
 from ev.safety.gate import SafetyGate, parse_yes_no
 from ev.safety.policy import Policy
 from ev.safety.provenance import TurnState
-from ev.skills.store import SkillStore
 from ev.stt.whisper import STT, Transcript, looks_like_junk
 from ev.tools.base import ToolRegistry
 from ev.tools.builtin import ToolContext, build_tools
@@ -86,9 +82,6 @@ class EVApp:
         self.calendar = make_calendar(str(ctx_cfg.get("calendar_source", "none")) if ctx_cfg.get("calendar", True) else "none",
                                       str(ctx_cfg.get("calendar_file", "")), float(ctx_cfg.get("calendar_refresh_s", 300)))
         self.context = ContextSnapshot(cfg, self.policy, self.calendar)
-        self.skills = SkillStore(cfg.skills_dir(), self.policy)
-        for problem in self.skills.load():
-            log.warning("skill skipped: %s", problem)
         self.registry: ToolRegistry = build_tools(ToolContext(cfg, self.memory, self.scheduler, self.policy,
                                                               vault=self.vault, index=self.index, turn=self.turn,
                                                               calendar=self.calendar))
@@ -101,11 +94,9 @@ class EVApp:
         self.selfinfo = SelfInfo(cfg, self._live_self)
         self._register_self_tool()
         self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting,
-                           vault=self.vault, index=self.index, turn=self.turn, context=self.context, skills=self.skills,
+                           vault=self.vault, index=self.index, turn=self.turn, context=self.context,
                            selfinfo=self.selfinfo)
         self.brain.on_facts_changed = self.brain.refresh_prompt_cache      # a fact changed: re-prime the prompt cache once
-        self.brain.on_tools_changed = self.brain.refresh_prompt_cache      # the skill list changed, so the tool schema did
-        self.proactive = self._build_proactive()
         self.stt = STT(cfg)
         self.vad = make_vad("silero", cfg["audio"]["vad_aggressiveness_threshold"])
         self.recorder = Recorder(cfg, self.vad, on_level=self._on_level)
@@ -137,7 +128,6 @@ class EVApp:
         # the dashboard: a window onto the same events the pill gets, plus a server that only runs if [dashboard] enabled
         self.hub = Hub()
         self.bus.subscribe("state", lambda old, new: self.hub.publish("state", old=old.value, new=new.value))
-        self.bus.subscribe("proactive", lambda **e: self.hub.publish("proactive", **{("what" if k == "kind" else k): v for k, v in e.items()}))
         self.brain.on_tool_result = lambda e: self.hub.publish("tool", **e)
         self.dashboard: DashboardServer | None = None
         self._register_dashboard_tool()
@@ -224,39 +214,6 @@ class EVApp:
         webbrowser.open(self.dashboard.login_url())
         return True
 
-    # ---- proactive: EV speaking up on its own, within the guards in config/proactive.toml
-    def _build_proactive(self) -> ProactiveEngine | None:
-        from ev.tools.base import Tool, ToolResult
-
-        pc = self.cfg.raw.get("proactive", {})
-        if not pc.get("enabled", True):
-            return None
-        rules, guards, problems = load_rules(self.cfg.root / str(pc.get("rules_file", "config/proactive.toml")))
-        guards, tuned = apply_overrides(guards, pc)
-        problems += tuned
-        engine = ProactiveEngine(
-            rules, guards, Probes(), Actions(say=self.say_direct, notice=self.overlay.send_notice, skill=self.brain.run_skill_proactive),
-            memory=self.memory, calendar=self.calendar, bus=self.bus, state_ok=self._may_speak_up)
-        engine.problems = problems
-
-        def snooze_proactive(minutes: float) -> ToolResult:
-            engine.snooze(minutes)
-            if minutes <= 0:
-                return ToolResult(True, "Okay, I'll speak up again if something comes up.")
-            m = int(round(minutes))
-            span = f"{m // 60} hour{'s' if m // 60 != 1 else ''}" if m % 60 == 0 and m >= 60 else f"{m} minute{'s' if m != 1 else ''}"
-            return ToolResult(True, f"Okay, I'll stay quiet for {span}.")
-
-        self.registry.register(Tool("snooze_proactive", "Stop speaking up on my own for a while (0 minutes ends it).",
-                                    {"minutes": {"type": "number", "minimum": 0, "maximum": 720}}, snooze_proactive, ("minutes",),
-                                    direct=True, llm_visible=False))
-        return engine
-
-    def _may_speak_up(self) -> bool:
-        """EV only volunteers something when it is completely idle: no turn, no follow-up window, no confirmation, not muted."""
-        return (self.sm.state is State.IDLE and not (self.muted or self.paused or self._confirming or self._following_up)
-                and not self._turn_lock.locked())
-
     def _show(self, who: str, text: str, append: bool = False) -> None:
         """Put a line of the conversation on the pill's text card (only does anything in display mode)."""
         if self.display_mode:
@@ -291,8 +248,6 @@ class EVApp:
             self.index.start()                                  # indexes the vault now, then every vault.poll_s
         if self.calendar:
             self.calendar.start()                               # refreshed in the background; never read on the request path
-        if self.proactive:
-            self.proactive.start()
         if self.vault and (n := len(self.vault.unconfirmed_facts())):
             log.warning("%d unconfirmed fact(s) in the vault; say \"review my unconfirmed facts\" to go through them", n)
         self.scheduler.start()
@@ -404,8 +359,6 @@ class EVApp:
             self.index.close()
         if self.calendar:
             self.calendar.stop()
-        if self.proactive:
-            self.proactive.stop()
         self.memory.close()
 
     # ---- event hooks
@@ -416,7 +369,7 @@ class EVApp:
 
     def _on_acting(self, active: bool) -> None:
         if self.sm.state is State.IDLE:
-            return          # a skill started by a rule or the dashboard: no turn is running, so don't fake one (IDLE -> THINKING would stick)
+            return          # started by the dashboard: no turn is running, so don't fake one (IDLE -> THINKING would stick)
         if active:
             self.sm.to(State.ACTING)
         else:

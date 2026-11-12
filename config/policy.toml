@@ -27,12 +27,8 @@ screenshot_describe = "safe"
 remember_fact = "safe"
 forget_fact = "safe"          # a write to memory the user didn't plainly say (web/screen/note text, or words they never said) is escalated to a spoken yes in code: ev/safety/provenance.py
 recall = "safe"               # read-only search of the vault; results are wrapped as untrusted data
-run_skill = "safe"            # a skill's steps are ordinary tool calls and EACH goes through the gate on its own; a risky step still asks
-save_skill = "safe"           # voice only (not in the model's tool list): turns what was just done into a skill file in skills/
-manage_skill = "safe"         # voice only: add a phrase, rename, list. Deleting a skill is escalated to confirm by policy.py (from the arguments)
 list_reminders = "safe"
 open_dashboard = "safe"        # voice only: opens EV's own loopback page in the browser (a one-time sign-in link; see SECURITY.md)
-snooze_proactive = "safe"     # voice only: makes EV quieter, never louder (it can't widen anything)
 get_agenda = "safe"           # read-only calendar (an .ics file or Outlook); only registered when a calendar is configured; event titles are untrusted data
 keep_fact = "confirm"         # voice only (not in the model's tool list): keep a hand-edited line of Facts.md as a fact. Always a spoken yes
 take_note = "safe"
@@ -86,7 +82,7 @@ open_extensions = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "txt", "md
                    "docx", "xlsx", "pptx", "mp3", "wav", "mp4"]
 # Where EV's own code may create files. The vault (ev/memory/vault.py) refuses to write anywhere else, so a bug there can't
 # reach the rest of the user's vault. Everything in the vault outside the EV folder is read-only to EV.
-write_dirs = ["{vault_ev}", "{skills}", "data/notes"]
+write_dirs = ["{vault_ev}", "data/notes"]
 
 [shell]
 enabled = false

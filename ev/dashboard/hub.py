@@ -7,7 +7,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-KEEP = {"turn": 30, "tool": 60, "proactive": 30, "job": 30, "state": 1, "level": 1}
+KEEP = {"turn": 30, "tool": 60, "job": 30, "state": 1, "level": 1}
 QUEUE_SIZE = 200
 
 

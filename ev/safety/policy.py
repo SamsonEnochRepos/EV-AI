@@ -231,8 +231,6 @@ class Policy:
             if combo in self.confirm_combos:
                 return Decision(Verdict.CONFIRM, f"press {combo}")
 
-        if tool == "manage_skill" and str(args.get("action")) == "delete":
-            return Decision(Verdict.CONFIRM, "delete a skill")
 
         if tool == "open_app" and args.get("admin") is True:
             return Decision(Verdict.CONFIRM, "open an app with administrator rights")

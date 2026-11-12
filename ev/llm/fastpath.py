@@ -265,39 +265,6 @@ def _memory_command(orig: str, t: str) -> FastMatch | None:
     return None
 
 
-# "save this as a pdf" is a request about a file, not the name of a routine; "note time" or "text adventure" are fine names.
-_NOT_A_SKILL_NAME = re.compile(r"(?:a |an |the )?(?:pdf|doc|docx|word|excel|text|txt|file|image|picture|png|jpg|csv|note|notes)"
-                               r"(?: file| document)?", re.I)
-_SKILL_NAME = r"(?P<n>[a-z0-9][a-z0-9 '_-]{1,39}?)"
-
-
-def _skill_command(t: str) -> FastMatch | None:
-    """Saving, naming, renaming, deleting and listing routines, by voice only: a skill is a standing automation, so the model
-    can't do any of this itself (these tools are not in its tool list)."""
-    m = re.search(_PRE + r"(?:save|store|keep|make) (?:that|this|it|what (?:i|we) (?:just )?did) as (?:a |an |the )?"
-                  r"(?:(?:skill|routine|shortcut|macro) )?(?:called |named )?" + _SKILL_NAME + _POST, t)
-    if m and not _NOT_A_SKILL_NAME.fullmatch(m["n"].strip()):
-        return FastMatch("save_skill", {"name": m["n"].strip()}, "skill_save")
-    m = re.search(_PRE + r"(?:also )?(?:run|start|do|trigger) (?:it|that|this) (?:when|if|whenever) i (?:say|ask for) (?P<p>.{2,60}?)" + _POST, t)
-    if m:
-        return FastMatch("manage_skill", {"action": "add_trigger", "name": "", "value": m["p"].strip(" '\"")}, "skill_trigger")
-    m = re.search(_PRE + r"(?:add|use) (?:the )?(?:phrase|trigger) (?P<p>.{2,60}?) (?:for|to) (?:the )?(?:(?:skill|routine) )?"
-                  r"(?P<n>[a-z0-9][a-z0-9 '_-]{1,39}?)" + _POST, t)
-    if m:
-        return FastMatch("manage_skill", {"action": "add_trigger", "name": m["n"].strip(), "value": m["p"].strip(" '\"")}, "skill_trigger")
-    m = re.search(_PRE + r"rename (?:the |my )?(?:skill|routine) (?P<a>[a-z0-9][a-z0-9 '_-]{1,39}?) (?:to|as) (?P<b>[a-z0-9][a-z0-9 '_-]{1,39}?)"
-                  + _POST, t)
-    if m:
-        return FastMatch("manage_skill", {"action": "rename", "name": m["a"].strip(), "value": m["b"].strip()}, "skill_rename")
-    m = (re.search(_PRE + r"(?:delete|remove) (?:the |my )?(?:skill|routine) " + _SKILL_NAME + _POST, t)
-         or re.search(_PRE + r"(?:delete|remove) (?:the |my )" + _SKILL_NAME + r" (?:skill|routine)" + _POST, t))
-    if m:
-        return FastMatch("manage_skill", {"action": "delete", "name": m["n"].strip()}, "skill_delete")
-    if re.search(_PRE + r"(?:what|which) (?:skills|routines) (?:do (?:i|you) have|are there)|list (?:my |the )?(?:skills|routines)" + _POST, t):
-        return FastMatch("manage_skill", {"action": "list"}, "skill_list")
-    return None
-
-
 # ---- the screen. A 3B model rarely picks click_element by itself, so the clear phrasings are
 # routed here in code. Every match still goes through the SafetyGate like any other call (sensitive windows, risky clicks
 # and key combos are decided there from the arguments, not from anything said here).
@@ -423,20 +390,9 @@ def match_fast(text: str) -> FastMatch | None:
     mem = _memory_command(orig, t)
     if mem:
         return mem
-    sk = _skill_command(t)
-    if sk:
-        return sk
     scr = _screen_command(orig, t)
     if scr:
         return scr
-    # "quiet for an hour": stop EV speaking up on its own (proactive lines) for a while; "you can talk again" ends it
-    m = re.search(_PRE + r"(?:be quiet|stay quiet|go quiet|keep quiet|quiet|stop (?:interrupting|bothering) me|don'?t (?:interrupt|bother) me"
-                  r"|snooze(?: the)?(?: proactive| notifications?| alerts?)?)(?: for)?(?: the next)?\s+" + _NUM + r"\s*" + _UNIT + _POST, t)
-    if m and (d := _dur(m.group(1), m.group(2))):
-        return FastMatch("snooze_proactive", {"minutes": min(720.0, float(d.get("minutes", d.get("seconds", 0) / 60)))}, "snooze")
-    if re.search(_PRE + r"(?:you can (?:talk|speak|interrupt) (?:to me )?again|stop being quiet|unsnooze|resume (?:the )?(?:proactive|notifications?|alerts?))"
-                 + _POST, t):
-        return FastMatch("snooze_proactive", {"minutes": 0.0}, "unsnooze")
     if re.search(_PRE + r"(?:what(?:'s| is| are) (?:on )?my (?:reminders?|reminder list)|list (?:my )?reminders|do i have any reminders)"
                  + _POST, t):
         return FastMatch("list_reminders", {}, "list_reminders")
