@@ -120,7 +120,6 @@ screenshot_dir = ""             # where "take a screenshot" saves PNGs; "" = Pic
 # The island: a small black pill at the top of the screen showing a row of level bars (the sound wave). It opens while EV
 # listens or talks, half-opens while it thinks, and in display mode grows downward to show the conversation as text.
 enabled = true
-toolkit = "qt"                 # "qt" | "tk"
 anchor = "top-center"          # top-center|top-left|top-right|bottom-center|...
 offset_x = 0
 offset_y = 6
@@ -153,7 +152,6 @@ max_facts_in_prompt = 24       # the facts seeded from config/seed_facts.toml ta
 seed_file = "config/seed_facts.toml"   # facts moved out of persona.md; seeded into memory once at first start-up
 fact_max_chars = 200           # a remembered fact's value is cut to this
 fact_overlap_min = 0.8         # a model-made remember/forget is silent only if this share of its words are words you said in your last three utterances; otherwise EV asks first
-chromadb_enabled = false
 
 [vault]
 # Memory lives in a folder of Markdown files (an Obsidian vault; Obsidian doesn't have to be running). EV writes only inside

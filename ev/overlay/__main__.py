@@ -15,11 +15,6 @@ def main() -> int:
     ap.add_argument("--display", action="store_true", help="with --demo: show display mode (the text card)")
     a = ap.parse_args()
     cfg = load_config()
-    toolkit = cfg["overlay"].get("toolkit", "qt")
-    if toolkit == "tk" and a.demo:     # Tk is demo/benchmark-only (see docs/DECISIONS.md D5)
-        from . import tk_app
-
-        return tk_app.run_demo(cfg)
     from . import qt_app
 
     return qt_app.run_demo(cfg, a.display) if a.demo else qt_app.run_server(cfg)
