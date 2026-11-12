@@ -198,7 +198,7 @@ def persona_eval(model: str | None = None, judge: bool = True) -> Recorder:
     for k, v in _EVAL_FACTS.items():
         mem.remember(k, v)
     ctx = _EvalContext()
-    brain.context = ctx                          # type: ignore[assignment]   # stands in for ContextSnapshot, one block per prompt
+    brain._beside_the_request = lambda _t: (ctx.block.text if ctx.block else "")     # type: ignore[assignment,method-assign]   # one test block per prompt
     jclient = OllamaClient(cfg)
     scores: list[float] = []
     talk: list[str] = []                         # replies to chat (not actions), for the rates below

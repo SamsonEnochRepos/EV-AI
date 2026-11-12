@@ -12,7 +12,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ev.context.snapshot import ContextSnapshot
 from ev.core.config import Config
 from ev.core.log import get_logger
 from ev.memory.store import MemoryStore
@@ -32,7 +31,6 @@ from ev.tools.base import Tool, ToolRegistry, ToolResult, validate_args
 
 from .client import LLMError, OllamaClient, ToolCall
 from .fastpath import FastMatch, looks_like_question, match_compound, match_fast, match_smalltalk
-from .selfinfo import SelfInfo, looks_about_self
 from .sentences import SentenceSplitter
 from .spoken import drop_name_opener, spoken_text
 
@@ -136,11 +134,8 @@ class Brain:
                  on_acting: Callable[[bool], None] | None = None,
                  now: Callable[[], dt.datetime] = dt.datetime.now,
                  vault: Vault | None = None, index: VaultIndex | None = None, turn: TurnState | None = None,
-                 context: ContextSnapshot | None = None,
-                 selfinfo: SelfInfo | None = None):
+                 ):
         self.cfg = cfg
-        self.context = context
-        self.selfinfo = selfinfo
         self.page_load_s = float(cfg.get("screen", "page_load_s", 3.5))   # wait between "open the site" and "click the first video"
         self.on_tool_result: Callable[[dict[str, Any]], object] | None = None      # the dashboard's window onto what the gate decided
         self.client = client
@@ -224,18 +219,8 @@ class Brain:
         """Per-turn context for the latest user message: what's on the computer, and (optionally) relevant notes. Neither goes
         in the system prompt, whose bytes must not change between turns (D21)."""
         parts: list[str] = []
-        if self.context is not None:
-            block = self.context.build(user_text)
-            if block:
-                parts.append(block.text)
-                if block.outside_text:
-                    self.turn.untrusted_seen = True        # a window title or file name came from outside: a saved fact needs a yes
         if recalled := self._auto_recall(user_text):
             parts.append(recalled)
-        if self.selfinfo is not None and looks_about_self(user_text):
-            # System-made text from the config (not a window title or a web page), so it needs no untrusted wrapper
-            parts.append("True facts about yourself, for answering a question about you (say only what was asked, in plain words, "
-                         "never guess):\n" + self.selfinfo.block())
         return "\n\n".join(parts)
 
     def _auto_recall(self, user_text: str) -> str:

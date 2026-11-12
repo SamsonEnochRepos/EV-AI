@@ -108,10 +108,6 @@ class AppBackend:
             a.overlay.send_display(bool(value))
         elif s.section == "conversation":
             pass                                    # read from the config at every turn
-        elif key == "context.enabled":
-            a.context.enabled = bool(value)
-        elif s.section == "context":
-            a.context.on[s.name] = bool(value)
         else:
             return False
         return True

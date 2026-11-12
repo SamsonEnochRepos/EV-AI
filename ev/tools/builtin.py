@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ev.context.calendar import CachedCalendar
 from ev.core.config import Config
 from ev.memory.store import MemoryStore
 from ev.memory.vault import Vault, VaultError
@@ -33,7 +32,6 @@ class ToolContext:
     vault: Vault | None = None     # where facts live; None = the SQLite facts table (vault switched off)
     index: VaultIndex | None = None
     turn: TurnState | None = None  # what the system observed this turn; says how a fact write should be labelled
-    calendar: CachedCalendar | None = None   # read-only; None when no calendar is configured (then there is no get_agenda tool)
 
 
 def _spoken_duration(seconds: int) -> str:
@@ -282,17 +280,6 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
             return ToolResult(False, str(e))
         return ToolResult(True, f"Okay, I'll keep that: {fact.key.replace('_', ' ')}.")
 
-    def get_agenda(day: str = "today") -> ToolResult:
-        assert ctx.calendar is not None
-        target = ctx.now().date() + dt.timedelta(days=1 if day == "tomorrow" else 0)
-        events = ctx.calendar.on_day(target)
-        if not events:
-            return ToolResult(True, f"Nothing on the calendar {day}.")
-        text = "\n".join(f"- {'all day' if e.all_day else e.start.strftime('%I:%M %p').lstrip('0')}: {e.title}" for e in events[:12])
-        return ToolResult(True, text, {"count": len(events)}, untrusted=True, source="calendar",
-                          hint="Tell the user their day in one or two short spoken sentences: how many things there are and "
-                               "the first one. Read out more only if they ask.")
-
     def recall(query: str = "", when: str = "") -> ToolResult:
         assert ctx.index is not None
         k = int(ctx.cfg.get("vault", "recall_k", 4))
@@ -362,9 +349,6 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         reg.register(Tool("recall", "Search the user's notes for what they said or wrote earlier. when: today, yesterday, last week, a month.",
                           {"query": {"type": S, "maxLength": 120}, "when": {"type": S, "maxLength": 30}}, recall,
                           timeout_s=10))
-    if ctx.calendar is not None:
-        reg.register(Tool("get_agenda", "What is on the user's calendar today or tomorrow.",
-                          {"day": {"type": S, "enum": ["today", "tomorrow"]}}, get_agenda, timeout_s=5))
     if ctx.vault is not None:
         reg.register(Tool("keep_fact", "Keep a hand-written note in the facts file as a fact.",
                           {"id": {"type": S, "maxLength": 12}}, keep_fact, ("id",), direct=True, llm_visible=False))

@@ -167,23 +167,6 @@ auto_recall_k = 2
 enabled = true
 port = 0                       # 0 = pick a free port each start
 
-[context]
-# A few lines about what is going on, put beside your request (never in the system prompt, so the prompt cache is untouched).
-# Only the lines your request is about are included; the app you are in always is. Window titles, file names and event titles
-# are text other people control, so the block is wrapped as untrusted data. Each signal can be switched off.
-enabled = true
-max_chars = 450                # the whole block, before the wrapper (about 110 tokens)
-foreground = true              # "Using Firefox: <page title>". A password manager, bank or other sensitive window shows the app only
-calendar = true                # the next event (needs calendar_source below)
-calendar_source = "none"       # "none" | "ics" (a file) | "outlook" (classic Outlook through COM). Read-only either way
-calendar_file = ""             # path to an .ics file when calendar_source = "ics"
-calendar_refresh_s = 300       # refreshed in the background, never while you wait
-recent_files = true            # up to three file names from Downloads, Desktop and the screenshot folder, last recent_files_minutes
-recent_files_minutes = 120
-battery = true
-git = true                     # branch and changed-file count of a repo open in the foreground editor or terminal
-repos = []                     # git repo folders to watch, e.g. ["C:/Users/you/Desktop/Projects/EV_AI"]
-
 [privacy]
 persist_audio = false
 persist_screenshots = false

@@ -5,7 +5,6 @@ from ev.control.tools import _clicked
 from ev.llm.brain import Brain, claims_action
 from ev.llm.client import OllamaClient
 from ev.llm.fastpath import match_compound, match_fast
-from ev.llm.selfinfo import SelfInfo, looks_about_self, spoken_model, spoken_voice
 from ev.safety.gate import SafetyGate
 from ev.screen.ocr import OCR, OcrItem
 from ev.screen.uia import UIElement, find_element
@@ -16,10 +15,10 @@ from .fakes import FakeOllama, ndjson, text_reply, tool_reply
 NOW = lambda: dt.datetime(2026, 1, 2, 15, 4)  # noqa: E731
 
 
-def _brain(cfg, memory, policy, registry, fake, selfinfo=None):
+def _brain(cfg, memory, policy, registry, fake):
     client = OllamaClient(cfg, transport=fake.transport())
     gate = SafetyGate(policy, ask=lambda _r: False)
-    return Brain(cfg, client, memory, registry, gate, persona="You are EV.", now=NOW, selfinfo=selfinfo)
+    return Brain(cfg, client, memory, registry, gate, persona="You are EV.", now=NOW)
 
 
 def _recording(registry, name, params, required=()):
@@ -137,70 +136,6 @@ def test_play_the_video_by_goes_to_the_screen_agent():
 
 
 # ---- self-knowledge
-def test_model_and_voice_names_read_well_aloud():
-    assert spoken_model("qwen2.5:3b") == "Qwen 2 point 5, 3 billion"
-    assert spoken_model("llama3.2:latest") == "Llama 3 point 2"
-    assert spoken_model("qwen2.5vl:3b") == "Qwen 2 point 5 VL, 3 billion"
-    assert spoken_voice("en_US-hfc_female-medium") == "hfc female, medium quality"
-
-
-def test_questions_about_itself_are_answered_from_the_config(cfg):
-    topic = lambda t: (match_fast(t).args["topic"] if match_fast(t) else None)  # noqa: E731
-    assert topic("What's your current text-to-speech model name?") == "tts"
-    assert topic("which speech to text model do you use") == "stt"
-    assert topic("what LLM are you running on") == "llm"
-    assert topic("how were you built") == "build"
-    assert topic("what technologies do you use") == "build"
-    assert topic("how do you hear me") == "stt"
-    assert topic("tell me about yourself") == "overview"
-    assert topic("what is a language model") is None                             # a general question is not about EV
-    info = SelfInfo(cfg, lambda: {"stt_model": "small", "stt_device": "cuda", "tts_engine": "piper", "llm_model": "qwen2.5:3b"})
-    assert "Piper" in info.tts() and "hfc female" in info.tts()
-    assert "Whisper small" in info.stt() and "graphics card" in info.stt()
-    assert "Qwen 2 point 5, 3 billion" in info.llm() and "Ollama" in info.llm()
-    assert "hey evie" in info.wake() and "openWakeWord" in info.wake()
-
-
-def test_what_is_really_loaded_beats_the_config(cfg):
-    info = SelfInfo(cfg, lambda: {"tts_engine": "kokoro", "stt_device": "cpu", "llm_model": "llama3.2:latest"})
-    assert "Kokoro" in info.tts() and "processor" in info.stt() and info.llm().startswith("I think with Llama 3 point 2")
-
-
-def test_a_broken_status_read_does_not_break_an_answer(cfg):
-    def boom():
-        raise RuntimeError("no stt yet")
-
-    assert "Whisper" in SelfInfo(cfg, boom).stt()
-
-
-def test_about_self_through_the_brain_is_a_gated_call_with_no_model(cfg, memory, policy, registry):
-    info = SelfInfo(cfg, lambda: {"tts_engine": "piper"})                         # (this machine's ev.local.toml picks kokoro)
-    registry.register(Tool("about_self", "x", {"topic": {"type": "string", "enum": ["tts", "overview"]}},
-                           lambda topic="overview": ToolResult(True, info.answer(topic)), (), direct=True, llm_visible=False))
-    fake = FakeOllama([text_reply("it's about Firefox")])
-    brain = _brain(cfg, memory, policy, registry, fake, selfinfo=info)
-    res = brain.respond("What's your current text-to-speech model name?")
-    assert not fake.requests and "Piper" in res.text and res.tool_log[0]["decision"] == "allow"
-    assert "about_self" not in str(registry.schemas())                           # costs the model's prompt nothing
-
-
-def test_a_looser_self_question_gets_the_facts_beside_it(cfg, memory, policy, registry):
-    fake = FakeOllama([text_reply("I run on a small local model.")])
-    brain = _brain(cfg, memory, policy, registry, fake, selfinfo=SelfInfo(cfg, lambda: {"tts_engine": "piper"}))
-    assert looks_about_self("why is your voice so quiet today")
-    assert not looks_about_self("what's the weather")
-    brain.respond("so what do you reckon your brain is made of", allow_fast=False)
-    sent = fake.requests[0]["messages"][-1]["content"]
-    assert "True facts about yourself" in sent and "Piper" in sent
-    fake2 = FakeOllama([text_reply("Sunny.")])
-    _brain(cfg, memory, policy, registry, fake2, selfinfo=SelfInfo(cfg)).respond("what's the weather like", allow_fast=False)
-    assert "True facts about yourself" not in fake2.requests[0]["messages"][-1]["content"]
-
-
-def test_about_self_has_a_policy_level(policy):
-    assert policy.levels["about_self"] == "safe"
-
-
 # ---- clicking: a log line that mentions the target is not the target
 def test_a_paragraph_that_mentions_the_target_is_not_a_control():
     els = [UIElement("2026-11-09 17:23:12,598 INFO ev.app: heard (follow-up): Alright, can you click on the YouTube site? and more words here", "Text", (0, 0, 9, 9)),
@@ -258,7 +193,6 @@ def test_page_things_go_to_the_screen_agent_and_the_other_phrasings_match():
               "play the video which says I tested most futuristic tech"]:
         assert match_fast(t).tool == "do_on_screen", t
     assert match_fast("close the tab") is None and match_fast("switch to the firefox browser").args == {"title": "firefox"}
-    assert match_fast("What is the STD model we are using?").args == {"topic": "stt"}
     from ev.stt.whisper import fix_names
 
     assert fix_names("close the makersoft edge tab") == "close the Microsoft edge tab"

@@ -17,8 +17,6 @@ from ev.audio.interrupt import InterruptMonitor
 from ev.audio.playback import Player
 from ev.audio.trigger import Hotkeys, WakeWord
 from ev.audio.vad import make_vad
-from ev.context.calendar import make_calendar
-from ev.context.snapshot import ContextSnapshot
 from ev.core.config import Config
 from ev.core.events import EventBus, State
 from ev.core.log import get_logger, setup_logging
@@ -28,7 +26,6 @@ from ev.dashboard.server import DashboardServer
 from ev.llm.brain import Brain
 from ev.llm.client import LLMError, OllamaClient, OllamaDown
 from ev.llm.fastpath import is_stop
-from ev.llm.selfinfo import TOPICS, SelfInfo
 from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.overlay.client import OverlayClient
@@ -78,24 +75,16 @@ class EVApp:
         self.scheduler = Scheduler(self.memory, self._on_alert)
         self.turn = TurnState()
         self.vault, self.index = open_vault(cfg, self.memory, self.policy)
-        ctx_cfg = cfg.raw.get("context", {})
-        self.calendar = make_calendar(str(ctx_cfg.get("calendar_source", "none")) if ctx_cfg.get("calendar", True) else "none",
-                                      str(ctx_cfg.get("calendar_file", "")), float(ctx_cfg.get("calendar_refresh_s", 300)))
-        self.context = ContextSnapshot(cfg, self.policy, self.calendar)
         self.registry: ToolRegistry = build_tools(ToolContext(cfg, self.memory, self.scheduler, self.policy,
-                                                              vault=self.vault, index=self.index, turn=self.turn,
-                                                              calendar=self.calendar))
+                                                              vault=self.vault, index=self.index, turn=self.turn))
         # display mode: the pill shows a text card with what the user said and what EV answers
         self.display_mode = self.memory.get_kv("display_mode", "1" if cfg["overlay"].get("display_mode") else "0") == "1"
         self._last_heard = ""
         self.overlay.send_display(self.display_mode)
         self._register_display_tool()
         self._register_screen_tools()
-        self.selfinfo = SelfInfo(cfg, self._live_self)
-        self._register_self_tool()
         self.brain = Brain(cfg, self.client, self.memory, self.registry, self.gate, on_acting=self._on_acting,
-                           vault=self.vault, index=self.index, turn=self.turn, context=self.context,
-                           selfinfo=self.selfinfo)
+                           vault=self.vault, index=self.index, turn=self.turn)
         self.brain.on_facts_changed = self.brain.refresh_prompt_cache      # a fact changed: re-prime the prompt cache once
         self.stt = STT(cfg)
         self.vad = make_vad("silero", cfg["audio"]["vad_aggressiveness_threshold"])
@@ -161,23 +150,6 @@ class EVApp:
         self.registry.register(Tool(
             "set_display_mode", "Turn display mode on or off: show the conversation as text on screen.",
             {"enabled": {"type": "boolean"}}, set_display_mode, ("enabled",), direct=True))
-
-    def _live_self(self) -> dict[str, Any]:
-        """What is really loaded right now, for "what model are you?": the chat model Ollama picked, the speech model and the
-        device it landed on, the voice engine that survived a fallback. Read when asked, so it is never stale."""
-        stt, speaker = getattr(self, "stt", None), getattr(self, "speaker", None)
-        return {"llm_model": self.client.model, "stt_model": getattr(stt, "model_name", ""), "stt_device": getattr(stt, "device", ""),
-                "tts_engine": getattr(getattr(speaker, "engine", None), "name", "")}
-
-    def _register_self_tool(self) -> None:
-        """about_self: voice only (the fast path asks for it; it is not in the model's tool list, so it costs no prompt)."""
-        from ev.tools.base import Tool, ToolResult
-
-        topics = list(TOPICS)
-        self.registry.register(Tool(
-            "about_self", "Say what model, voice, hearing or technology EV is built on.",
-            {"topic": {"type": "string", "enum": topics}}, lambda topic="overview": ToolResult(True, self.selfinfo.answer(topic)),
-            (), direct=True, llm_visible=False))
 
     # ---- dashboard: a loopback page, opened on request with a one-time sign-in link
     def _register_dashboard_tool(self) -> None:
@@ -246,8 +218,6 @@ class EVApp:
         self._select_model()
         if self.index:
             self.index.start()                                  # indexes the vault now, then every vault.poll_s
-        if self.calendar:
-            self.calendar.start()                               # refreshed in the background; never read on the request path
         if self.vault and (n := len(self.vault.unconfirmed_facts())):
             log.warning("%d unconfirmed fact(s) in the vault; say \"review my unconfirmed facts\" to go through them", n)
         self.scheduler.start()
@@ -357,8 +327,6 @@ class EVApp:
             self.tray.stop()
         if self.index:
             self.index.close()
-        if self.calendar:
-            self.calendar.stop()
         self.memory.close()
 
     # ---- event hooks

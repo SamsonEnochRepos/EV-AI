@@ -483,7 +483,7 @@ def match_fast(text: str) -> FastMatch | None:
     if m:
         return FastMatch("take_note", {"text": m.group(1)}, "note")
 
-    return match_self(t)
+    return None
 
 
 # ---- "Evie stop": a stop word alone (with or without the name) silences EV; it is never sent to the model. The speech model
@@ -505,34 +505,6 @@ _PICK_TAIL = re.compile(
     r"\s*(?:,\s*)?(?:and\s+then|and|then)\s+((?:play|watch|open|click(?: on)?|select|start)\s+(?:on\s+)?(?:the\s+)?"
     r"(?:first|top|second|third|1st|2nd|3rd|latest|newest)\s+(?:video|result|link|one)(?:\s+(?:that|which)\s+(?:comes|shows|appears|pops)\s+(?:up|out))?)"
     r"\W*$", re.I)
-
-
-# ---- questions about EV itself ("what text to speech model do you use?"): answered from the live config, never by the 3B model
-_YOU = r"\b(?:you|your|you're|yourself|evie|ev|we|our)\b"
-_SELF_TOPICS: list[tuple[str, str]] = [
-    ("tts", r"text[- ]?to[- ]?speech|\btts\b|voice (?:model|engine)|speech synth\w*|(?:what|which) (?:\w+ ){0,2}voice\b|how do you (?:speak|talk)"),
-    ("stt", r"speech[- ]?to[- ]?text|\b(?:stt|std)\b|speech recogni\w+|transcri\w+|whisper|how do you (?:hear|listen|understand (?:me|what i say))"),
-    ("wake", r"wake ?words?|hotword|how do you (?:know|hear) (?:when|that) i(?:'m| am)? (?:call|talk|say)\w*"),
-    ("vision", r"\bocr\b|vision model|(?:screen|camera) (?:model|reading)|how do you (?:see|read) (?:the |my )?(?:screen|display)"),
-    ("memory", r"how (?:does|do) (?:your )?memory work|where do you (?:store|keep|save) (?:my |your )?(?:memor\w+|notes|facts)|how do you remember"),
-    ("safety", r"how (?:do|are) you (?:stay |keep )?(?:safe|secure|protected)|what stops you from"),
-    ("llm", r"(?:llm|language model|ai model|chat model|\bmodel\b|\bbrain\b)|what (?:ai|llm) are you|powering you|powers you"),
-    ("overview", r"tell me about yourself|introduce yourself|describe yourself|what are you made of|what(?:'s| is) under the hood"),
-    ("build", r"how (?:were|are|was) (?:you|it) (?:built|made|created|developed|programmed|coded|designed)|(?:built|made|created|written|coded) (?:with|in|using|on|from)"
-              r"|tech(?:nology|nologies| stack)|programming language|what (?:are you|do you) (?:run|running|work) (?:on|with)|who (?:made|built|created|developed|wrote) you"),
-]
-_SELF_TOPIC_RES = [(topic, re.compile(rx)) for topic, rx in _SELF_TOPICS]
-
-
-def match_self(t: str) -> FastMatch | None:
-    """A plain question about EV's own models, voice, hearing or build. The second-person word keeps "what is a language model?"
-    (a general question) out; the topic words pick the answer. Matched last, so it can't shadow a command."""
-    if not re.search(_YOU, t) or not re.search(r"\b(?:what|which|how|who|tell|describe|explain|introduce|are|do|does|is|where)\b", t):
-        return None
-    for topic, rx in _SELF_TOPIC_RES:
-        if rx.search(t):
-            return FastMatch("about_self", {"topic": topic}, "about_self")
-    return None
 
 
 # ---- several things in one breath ("open Spotify and turn the volume down"): each clause is matched on its own and they run

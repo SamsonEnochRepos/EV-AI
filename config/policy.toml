@@ -14,7 +14,6 @@ close_app = "safe"            # polite close only; force=true escalates to confi
 open_website = "safe"         # public https sites only; unfamiliar links that carry a query string escalate to confirm
 take_screenshot = "safe"
 open_file = "safe"            # only files in [files] open_dirs, only the types in open_extensions; the tool re-checks the file it resolves itself
-about_self = "safe"           # voice only (not in the model's tool list): reads EV's own settings aloud (model, voice, hearing); touches nothing
 set_display_mode = "safe"     # toggles the on-screen text card; touches nothing but EV's own overlay
 set_timer = "safe"
 set_reminder = "safe"
@@ -29,7 +28,6 @@ forget_fact = "safe"          # a write to memory the user didn't plainly say (w
 recall = "safe"               # read-only search of the vault; results are wrapped as untrusted data
 list_reminders = "safe"
 open_dashboard = "safe"        # voice only: opens EV's own loopback page in the browser (a one-time sign-in link; see SECURITY.md)
-get_agenda = "safe"           # read-only calendar (an .ics file or Outlook); only registered when a calendar is configured; event titles are untrusted data
 keep_fact = "confirm"         # voice only (not in the model's tool list): keep a hand-edited line of Facts.md as a fact. Always a spoken yes
 take_note = "safe"
 focus_window = "safe"

@@ -63,12 +63,6 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("overlay.display_mode", "bool", "Display mode (text card)", live=True),
     Setting("overlay.display_linger_s", "float", "Card stays for (s)", 2, 30, False),
     Setting("overlay.display_font_pt", "int", "Card text size", 8, 24, False),
-    # what the context block shows (switches only)
-    Setting("context.enabled", "bool", "Give her a look at what is on my computer", live=True),
-    Setting("context.foreground", "bool", "...the app and window I am in", live=True),
-    Setting("context.recent_files", "bool", "...files that just appeared", live=True),
-    Setting("context.battery", "bool", "...battery", live=True),
-    Setting("context.git", "bool", "...git branch", live=True),
 )
 
 ALLOWED: dict[str, Setting] = {s.key: s for s in SETTINGS}

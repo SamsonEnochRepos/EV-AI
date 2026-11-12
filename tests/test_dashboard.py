@@ -283,7 +283,6 @@ def make_app(cfg: Config, tmp_path: Path, **over: Any) -> SimpleNamespace:
         client=SimpleNamespace(model="qwen2.5:3b", opts={"temperature": 0.6}, http=None),
         brain=SimpleNamespace(max_sentences=2, max_sentences_detail=6, filler_after_s=1.3, refresh_prompt_cache=lambda: True),
         speaker=FakeSpeaker(), overlay=SimpleNamespace(send_display=lambda _e: None), vault=None, index=None,
-        context=SimpleNamespace(enabled=True, on={"foreground": True, "recent_files": True, "battery": True, "git": True, "calendar": True}),
         _turn_lock=threading.Lock(), toggle_pause=lambda: None, toggle_mute=lambda: None,
         kill=lambda: None)
     for k, v in over.items():
@@ -302,8 +301,8 @@ def backend(cfg, tmp_path):
 def test_settings_are_written_to_ev_local_toml_and_nothing_else_is_touched(backend, tmp_path):
     ev, pol = ROOT / "config" / "ev.toml", ROOT / "config" / "policy.toml"
     before = (digest(ev), digest(pol))
-    out = backend.apply_settings({"llm.reply_max_sentences": 3, "conversation.followup_window_s": 9.5, "context.git": False})
-    assert out["saved"] == ["context.git", "conversation.followup_window_s", "llm.reply_max_sentences"]
+    out = backend.apply_settings({"llm.reply_max_sentences": 3, "conversation.followup_window_s": 9.5, "conversation.voice_interrupt": False})
+    assert out["saved"] == ["conversation.followup_window_s", "conversation.voice_interrupt", "llm.reply_max_sentences"]
     assert tomllib.loads((tmp_path / "ev.local.toml").read_text())["llm"] == {"reply_max_sentences": 3}
     assert (digest(ev), digest(pol)) == before
     assert {p.name for p in tmp_path.iterdir() if p.is_file()} <= {"ev.local.toml", "m.sqlite", "m.sqlite-wal", "m.sqlite-shm"}
@@ -311,9 +310,9 @@ def test_settings_are_written_to_ev_local_toml_and_nothing_else_is_touched(backe
 
 def test_live_settings_take_effect_now_and_restart_ones_say_so(backend):
     out = backend.apply_settings({"llm.reply_max_sentences": 4, "llm.temperature": 0.2, "trigger.wakeword_threshold": 0.7,
-                                  "tts.sentence_pause_ms": 40, "context.git": False})
+                                  "tts.sentence_pause_ms": 40, "conversation.voice_interrupt": False})
     assert backend.app.brain.max_sentences == 4 and backend.app.client.opts["temperature"] == 0.2
-    assert backend.app.speaker.pause_ms == 40 and backend.app.context.on["git"] is False
+    assert backend.app.speaker.pause_ms == 40
     assert out["restart_needed"] == ["trigger.wakeword_threshold"]
 
 
@@ -330,8 +329,8 @@ def test_a_setting_that_is_not_listed_is_refused_and_nothing_is_written(backend,
 
 @pytest.mark.parametrize("key,value", [("llm.reply_max_sentences", 99), ("llm.reply_max_sentences", 0), ("llm.reply_max_sentences", True),
                                        ("llm.reply_max_sentences", "3"), ("llm.temperature", float("nan")), ("llm.temperature", float("inf")),
-                                       ("conversation.followup_window_s", -1), ("context.git", 1), ("context.git", "yes"),
-                                       ("context.git", 2)])
+                                       ("conversation.followup_window_s", -1), ("conversation.voice_interrupt", 1), ("conversation.voice_interrupt", "yes"),
+                                       ("conversation.voice_interrupt", 2)])
 def test_values_outside_their_type_or_range_are_refused(key, value):
     with pytest.raises(SettingError):
         coerce(key, value)
@@ -341,10 +340,10 @@ def test_ints_stay_ints_and_floats_stay_floats():
     assert isinstance(coerce("llm.reply_max_sentences", 3.0), int) and isinstance(coerce("llm.temperature", 1), float)
 
 
-SAFE_SECTIONS = {"conversation", "trigger", "llm", "tts", "overlay", "context"}
+SAFE_SECTIONS = {"conversation", "trigger", "llm", "tts", "overlay"}
 WIDENING = {"path", "dir", "file", "host", "port", "url", "repos", "source", "token", "trusted", "allow", "block", "policy", "builder",
             "hotkey", "model", "engine", "device", "key", "password", "rules"}          # whole words of a key's name (split on _)
-NOT_WIDENING = {"overlay.display_mode", "context.enabled"}                       # EV's own text card / a switch for a read-only look
+NOT_WIDENING = {"overlay.display_mode"}                       # EV's own text card / a switch for a read-only look
 
 
 def widening_problems(allowed: dict[str, Any]) -> list[str]:
