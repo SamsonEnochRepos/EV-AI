@@ -6,7 +6,6 @@ from ev.llm.brain import Brain, claims_action
 from ev.llm.client import OllamaClient
 from ev.llm.fastpath import match_compound, match_fast
 from ev.safety.gate import SafetyGate
-from ev.screen.ocr import OCR, OcrItem
 from ev.screen.uia import UIElement, find_element
 from ev.tools.base import Tool, ToolResult
 
@@ -127,23 +126,12 @@ def test_a_failed_part_does_not_stop_the_rest(cfg, memory, policy, registry):
     assert volume == [{"direction": "down"}] and res.text.startswith("No spotify.")
 
 
-# ---- the play-a-pick phrasing now reaches the screen agent
-def test_play_the_video_by_goes_to_the_screen_agent():
-    m = match_fast("Can you play the video by Mihul Mohan?")
-    assert m and m.tool == "do_on_screen" and "Mihul Mohan" in m.args["goal"]
-    assert match_fast("play the next song") is None                              # not a pick on a page; it never was a command either
-    assert match_fast("play").tool == "media_control"
-
-
-# ---- self-knowledge
 # ---- clicking: a log line that mentions the target is not the target
 def test_a_paragraph_that_mentions_the_target_is_not_a_control():
     els = [UIElement("2026-11-09 17:23:12,598 INFO ev.app: heard (follow-up): Alright, can you click on the YouTube site? and more words here", "Text", (0, 0, 9, 9)),
            UIElement("YouTube", "Hyperlink", (0, 0, 9, 9))]
     assert find_element(els, "youtube").name == "YouTube"
     assert find_element(els[:1], "youtube site") is None
-    items = [OcrItem("2026-11-09 17:23:12,598 INFO ev.app: heard (follow-up): can you click on the YouTube site? and more", (0, 0, 5, 5), 0.9)]
-    assert OCR.find(items, "youtube site") is None
 
 
 def test_a_long_clicked_label_is_not_read_out():
@@ -175,39 +163,15 @@ def test_stop_words_are_a_command_not_a_question():
         assert not is_stop(t), t
 
 
-def test_a_search_then_play_is_two_steps(cfg, memory, policy, registry):
-    steps = match_compound("Can you open YouTube in Microsoft Edge and search for Mr. Who's the Boss and play the first video that comes out?")
-    assert [s.tool for s in steps] == ["open_website", "do_on_screen"]
-    assert steps[0].args["query"] == "mr, who's the boss" and "first video" in steps[1].args["goal"]
-    opened = _recording(registry, "open_website", {"site": {"type": "string"}, "query": {"type": "string"}, "browser": {"type": "string"}})
-    picked = _recording(registry, "do_on_screen", {"goal": {"type": "string"}}, ("goal",))
-    brain = _brain(cfg, memory, policy, registry, FakeOllama([text_reply("unused")]))
-    brain.page_load_s = 0
-    res = brain.respond("open YouTube and search for cats and then click the first result")
-    assert opened == [{"site": "youtube", "query": "cats"}] and "first result" in picked[0]["goal"]
-    assert [r["tool"] for r in res.tool_log] == ["open_website", "do_on_screen"]
-
-
-def test_page_things_go_to_the_screen_agent_and_the_other_phrasings_match():
-    for t in ["Can you open the YouTube channel?", "close the Edge tab", "switch to the VS Code tab", "open the first result",
-              "play the video which says I tested most futuristic tech"]:
-        assert match_fast(t).tool == "do_on_screen", t
+def test_tab_phrasings_are_left_to_the_model_and_window_switches_match():
     assert match_fast("close the tab") is None and match_fast("switch to the firefox browser").args == {"title": "firefox"}
     from ev.stt.whisper import fix_names
 
     assert fix_names("close the makersoft edge tab") == "close the Microsoft edge tab"
 
 
-def test_when_the_model_will_not_call_a_tool_the_screen_agent_does_it(cfg, memory, policy, registry):
-    picked = _recording(registry, "do_on_screen", {"goal": {"type": "string"}}, ("goal",))
-    fake = FakeOllama([text_reply("Great! I opened the video and clicked on it.")])
-    brain = _brain(cfg, memory, policy, registry, fake)
+def test_when_the_model_will_not_call_a_tool_the_user_hears_the_truth(cfg, memory, policy, registry):
+    brain = _brain(cfg, memory, policy, registry, FakeOllama([text_reply("Sure, I'll set that up for you.")]))
     spoken = []
-    brain.respond("Can you play the video which says best tech", on_sentence=spoken.append, allow_fast=False)
-    assert picked == [{"goal": "Can you play the video which says best tech"}]
-    assert spoken == ["do_on_screen done."] and "clicked on it" not in str(brain.history)
-    # nothing to do on screen: the plain truth
-    brain2 = _brain(cfg, memory, policy, registry, FakeOllama([text_reply("Sure, I'll set that up for you.")]))
-    spoken2 = []
-    brain2.respond("Can you sort my life out", on_sentence=spoken2.append, allow_fast=False)
-    assert spoken2 == ["I wasn't able to do that one. Could you put it another way?"]
+    brain.respond("Can you sort my life out", on_sentence=spoken.append, allow_fast=False)
+    assert spoken == ["I wasn't able to do that one. Could you put it another way?"]

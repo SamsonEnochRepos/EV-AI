@@ -27,10 +27,7 @@ def _clicked(label: str) -> str:
 
 
 def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate: SafetyGate) -> None:
-    from ev.screen import capture, uia
-    from ev.screen.ocr import OCR
-
-    ocr = OCR(cfg)
+    from ev.screen import uia
 
     def _killed() -> bool:
         return gate.killed.is_set()
@@ -48,7 +45,6 @@ def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate:
             return ToolResult(False, "Stopped.")
         win = uia.foreground_window()
         title = uia.window_title(win) if win is not None else ""
-        # layer 1: UI Automation
         if win is not None:
             els = uia.elements(win)
             el = uia.find_element(els, name)
@@ -58,18 +54,10 @@ def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate:
                     return ToolResult(False, "That control looks sensitive, so I won't click it.")
                 _pag().click(*el.center)
                 return ToolResult(True, _clicked(el.name), {"layer": "uia"})
-        # layer 2: OCR
         d = policy.check_sensitive_target(title, name)
         if d.verdict is Verdict.BLOCK:
             return ToolResult(False, "That looks sensitive, so I won't click it.")
-        img = capture.grab(cfg)
-        hit = OCR.find(ocr.read(img), name)
-        if hit is None:
-            return ToolResult(False, f"I couldn't find {name} on screen.")
-        scale_x = _pag().size()[0] / img.size[0]
-        cx, cy = hit.center
-        _pag().click(int(cx * scale_x), int(cy * scale_x))
-        return ToolResult(True, _clicked(hit.text), {"layer": "ocr"})
+        return ToolResult(False, f"I couldn't find {name} on screen.")
 
     def type_text(text: str) -> ToolResult:
         if _killed():
@@ -132,15 +120,15 @@ def register_control_tools(reg: ToolRegistry, cfg: Config, policy: Policy, gate:
 
     S = "string"
     reg.register(Tool("click_element", "Click a button, link or control by its visible name.",
-                      {"name": {"type": S, "maxLength": 80}}, click_element, ("name",), timeout_s=20))
+                      {"name": {"type": S, "maxLength": 80}}, click_element, ("name",), timeout_s=20, llm_visible=False))
     reg.register(Tool("type_text", "Type text into the focused field.",
-                      {"text": {"type": S, "maxLength": 500}}, type_text, ("text",), timeout_s=30))
+                      {"text": {"type": S, "maxLength": 500}}, type_text, ("text",), timeout_s=30, llm_visible=False))
     reg.register(Tool("press_keys", "Press a key or shortcut such as ctrl+s.",
-                      {"combo": {"type": S, "maxLength": 30}}, press_keys, ("combo",)))
+                      {"combo": {"type": S, "maxLength": 30}}, press_keys, ("combo",), llm_visible=False))
     reg.register(Tool("scroll", "Scroll the active window.", {
         "direction": {"type": S, "enum": ["up", "down"]},
-        "amount": {"type": "integer", "minimum": 1, "maximum": 20}}, scroll, ("direction",)))
+        "amount": {"type": "integer", "minimum": 1, "maximum": 20}}, scroll, ("direction",), llm_visible=False))
     reg.register(Tool("focus_window", "Bring a window to the front by part of its title.",
-                      {"title": {"type": S, "maxLength": 80}}, focus_window, ("title",)))
-    reg.register(Tool("copy_selection", "Copy the current selection.", {}, copy_selection))
-    reg.register(Tool("paste", "Paste the clipboard.", {}, paste))
+                      {"title": {"type": S, "maxLength": 80}}, focus_window, ("title",), llm_visible=False))
+    reg.register(Tool("copy_selection", "Copy the current selection.", {}, copy_selection, llm_visible=False))
+    reg.register(Tool("paste", "Paste the clipboard.", {}, paste, llm_visible=False))

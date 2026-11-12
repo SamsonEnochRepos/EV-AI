@@ -104,7 +104,6 @@ _REQUEST_LIKE = re.compile(
     r"don'?t see|isn'?t (?:open|working|there)|not (?:open|switched|there|working))\b", re.I)
 _NUDGE = ("[system note, not from the user] You said you would do something but called no tool, so nothing happened. If a tool can "
           "do what the user asked, call it now. If none can, say so plainly in one short sentence. Never say something is done unless a tool did it.")
-_SCREEN_ISH = re.compile(r"\b(?:click|play|video|tab|channel|page|window|scroll|type|press|button|link|result|switch|close|open)\b", re.I)
 _NOT_DONE = "I wasn't able to do that one. Could you put it another way?"
 
 
@@ -136,7 +135,6 @@ class Brain:
                  vault: Vault | None = None, index: VaultIndex | None = None, turn: TurnState | None = None,
                  ):
         self.cfg = cfg
-        self.page_load_s = float(cfg.get("screen", "page_load_s", 3.5))   # wait between "open the site" and "click the first video"
         self.on_tool_result: Callable[[dict[str, Any]], object] | None = None      # the dashboard's window onto what the gate decided
         self.client = client
         self.memory = memory
@@ -164,7 +162,7 @@ class Brain:
         self.max_sentences_detail = int(llm.get("reply_max_sentences_detail", 6))
         self.direct_replies = bool(llm.get("direct_tool_replies", False))
         self.filler_after_s = float(llm.get("filler_after_s", 1.3))
-        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather", "read_screen", "screenshot_describe"]))
+        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather"]))
         self.rewarm_after_s = float(llm.get("rewarm_after_s", 90))
         self.lookup_planner = bool(llm.get("lookup_planner", True))
         self.deep_model = str(llm.get("deep_model", "") or "")      # "" = no bigger model; used only when the user asks for it
@@ -298,10 +296,6 @@ class Brain:
         self._remember_turn(text, out.text)
         return out
 
-    def _screen_fallback_ok(self, user_text: str) -> bool:
-        return ("do_on_screen" in self.registry.names() and not _RECAP_Q.search(user_text) and len(user_text.split()) >= 3
-                and bool(_SCREEN_ISH.search(user_text)))
-
     def _run_compound(self, text: str, steps: list[FastMatch], filler: Callable[[], None] | None = None) -> TurnResult:
         """"Open Spotify and turn the volume down": every clause is its own call through the gate, in order. The small model
         used to answer these with one action and a promise of the rest."""
@@ -311,8 +305,6 @@ class Brain:
             if fm.tool not in self.registry.names():
                 log_.append({"tool": fm.tool, "args": fm.args, "ok": False, "message": "I can't do that one."})
                 continue
-            if fm.tool == "do_on_screen" and log_ and log_[-1].get("ok") and log_[-1]["tool"] in ("open_website", "open_app"):
-                time.sleep(self.page_load_s)                 # the page has to be up before the screen agent looks at it
             log_.append(self._execute(fm.tool, fm.args, filler, source=SOURCE_FAST))
         said = " ".join(t for r in log_ if (t := spoken_text(str(r.get("message", "")))))
         out = TurnResult(said, log_, fast_path=True)
@@ -463,12 +455,6 @@ class Brain:
                         continue
                     log.warning("still no tool call after the nudge (%r)", full[:100])
                     msg = _NOT_DONE
-                    if self._screen_fallback_ok(user_text):
-                        # The model understood this as something to do on screen but won't call a tool: the screen agent can
-                        # (it is gated like any call, and bounded).
-                        r = self._execute("do_on_screen", {"goal": user_text[:300]}, filler, source=SOURCE_FAST)
-                        result.tool_log.append(r)
-                        msg = spoken_text(str(r.get("message", ""))) or _NOT_DONE
                     spoken.append(msg)
                     on_sentence(msg)
                     break

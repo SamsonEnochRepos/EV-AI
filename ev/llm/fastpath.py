@@ -277,11 +277,6 @@ _KEY_NAMES = {"control": "ctrl", "ctrl": "ctrl", "alt": "alt", "shift": "shift",
               "home": "home", "end": "end", "pageup": "pageup", "pagedown": "pagedown"}
 _AMOUNT = {"lot": 10, "bit": 2, "little": 2, "way": 10}
 
-# "open notepad and type hello", "click the search box and type cats": more than one step, so the screen agent plans it
-_MULTI_STEP = re.compile(
-    _PRE + r"(?:open|launch|start|click|press|focus|switch to|select|scroll)\b.{2,120}?\s+(?:and|then|and then)\s+"
-    r"(?:type|write|click|press|tap|scroll|select|fill|submit|send|save)\b.{1,150}" + _POST, re.I)
-
 def _key_combo(spoken: str) -> str | None:
     """"control s" / "ctrl plus shift t" / "enter" -> "ctrl+s" / "ctrl+shift+t" / "enter"; None if any word is not a key."""
     s = re.sub(r"\b(?:the|key|keys|button|then)\b", " ", spoken.lower().replace("+", " "))
@@ -307,16 +302,7 @@ def _target(raw: str) -> str | None:
 
 
 def _screen_command(orig: str, t: str) -> FastMatch | None:
-    """Clicking, typing, keys, scrolling and switching windows said plainly, and multi-step tasks handed to the screen agent."""
-    if _MULTI_STEP.search(t):
-        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_task")
-    if re.search(_PRE + r"(?:open|go to|switch to|close|click(?: on)?)\s+(?:the |my )?(?:[a-z0-9 .+-]{2,30}? )?(?:tab|channel|playlist|page)(?: for me)?" + _POST, t) and not re.search(
-            r"\b(?:browser|window|app)s?\b|^(?:\W*(?:hey |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?:please )?(?:can you |could you )?close (?:the |this |that )?tab\W*$", t):
-        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_page")      # "open the YouTube channel", "close the Edge tab": things on a page
-    m = re.search(_PRE + r"(?:play|watch|open|click(?: on)?|select|start)\s+(?:the\s+)?(?:(?P<o>first|second|third|top|1st|2nd|3rd|latest|newest|last)\s+)?"
-                  r"(?:video|result|link|song|track|channel)(?P<by>\s+(?:by|from|called|named|titled|about|which says|that says|saying|with the title)\s+.{2,100}?)?" + _POST, t)
-    if m and (m["o"] or m["by"]):         # "play the video by X", "open the first result": a pick on a page, so the screen agent does it
-        return FastMatch("do_on_screen", {"goal": orig[:300]}, "screen_pick")
+    """Clicking, typing, keys, scrolling and switching windows said plainly."""
     m = re.search(_PRE + r"(?:press|hit|push|tap)\s+(?P<k>[a-z0-9 +]{1,40}?)" + _POST, t)
     if m and (combo := _key_combo(m["k"])):
         return FastMatch("press_keys", {"combo": combo}, "keys")
@@ -424,11 +410,6 @@ def match_fast(text: str) -> FastMatch | None:
         + _POST, t)
     if m:
         return FastMatch("read_screen", {}, "screen", then_llm=True)
-    m = re.search(_PRE + r"(?:describe|explain|what(?:'s| is)|look at|tell me about)(?: me)? (?:this|that|the) "
-                  r"(?:image|picture|photo|chart|graph|diagram|meme|logo|icon|video|design)(?: on (?:my |the )?(?:screen|display))?" + _POST, t)
-    if m:                                                    # a picture needs the vision model: text reading can't describe it
-        return FastMatch("screenshot_describe", {"question": orig[:200]}, "screen_visual", then_llm=True)
-
     # the file EV last made: "open it", "open the screenshot you just took", "show me the last note"
     if re.search(
         _PRE + r"(?:open|show|pull up|bring up|display)(?: up)?(?: me)?\s+(?:(?:it|that|this)(?: (?:file|one))?"
@@ -500,16 +481,9 @@ def is_stop(text: str) -> bool:
     return bool(_STOP.match(text))
 
 
-# "...search for X and play the first video": the search is one step and the pick is another (the screen agent, once the page is up)
-_PICK_TAIL = re.compile(
-    r"\s*(?:,\s*)?(?:and\s+then|and|then)\s+((?:play|watch|open|click(?: on)?|select|start)\s+(?:on\s+)?(?:the\s+)?"
-    r"(?:first|top|second|third|1st|2nd|3rd|latest|newest)\s+(?:video|result|link|one)(?:\s+(?:that|which)\s+(?:comes|shows|appears|pops)\s+(?:up|out))?)"
-    r"\W*$", re.I)
-
-
 # ---- several things in one breath ("open Spotify and turn the volume down"): each clause is matched on its own and they run
 # in order. Only tools that are plain commands qualify: nothing that carries free text (a note, a reminder, typing), nothing that
-# needs the model afterwards (a search), and nothing that clicks or types on a screen (that is the screen agent's job).
+# needs the model afterwards (a search), and nothing that clicks or types on a screen.
 _COMPOUND_OK = frozenset({"open_app", "open_website", "close_app", "set_volume", "media_control", "set_timer", "take_screenshot",
                           "get_time_date", "list_reminders", "open_dashboard", "set_display_mode"})
 _SPLIT = re.compile(r"\s*(?:,\s*)?(?:\b(?:and then|and also|and|then|also|after that|plus)\b|,)\s+")
@@ -519,13 +493,6 @@ _LEAD_VERB = re.compile(_PRE + r"(?P<v>open|launch|start|close|quit)\b")
 def match_compound(text: str) -> list[FastMatch] | None:
     t = re.sub(r"\s+", " ", text.strip().lower())
     t = re.sub(r"[.?!]+\s+(?=[a-z])", ", ", t)
-    if pick := _PICK_TAIL.search(t):
-        head = match_fast(t[: pick.start()])
-        if head and head.tool == "open_website" and head.args.get("query"):
-            goal = f"{pick.group(1).strip()} (on the page that just opened)"
-            return [head, FastMatch("do_on_screen", {"goal": goal[:300]}, "pick_after_search")]
-    if _MULTI_STEP.search(t):
-        return None                                     # "open notepad and type hello" waits for the window: the screen agent's job
     parts = [p.strip(" .,!?") for p in _SPLIT.split(t) if p and p.strip(" .,!?")]
     if not 2 <= len(parts) <= 3:
         return None

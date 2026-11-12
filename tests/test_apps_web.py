@@ -51,7 +51,6 @@ def test_everyday_actions_just_run(policy, tool, args):
     ("close_app", {"name": "chrome", "force": True}),
     ("open_app", {"name": "terminal", "admin": True}),
     ("open_app", {"name": "powershell as administrator"}),
-    ("do_on_screen", {"goal": "open cmd and run it as admin"}),
     ("close_app", {"name": "admin tool"}),
     ("open_website", {"url": "https://unfamiliar-site.com/collect?data=abc"}),
     ("open_website", {"url": "https://example.com/page"}),

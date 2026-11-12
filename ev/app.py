@@ -127,10 +127,8 @@ class EVApp:
             from ev.control.tools import register_control_tools
             from ev.screen.tools import register_screen_tools
 
-            register_screen_tools(self.registry, self.cfg, self.policy, self.client,
-                                  on_artifact=self.memory.set_last_artifact)
+            register_screen_tools(self.registry, self.cfg, self.policy, on_artifact=self.memory.set_last_artifact)
             register_control_tools(self.registry, self.cfg, self.policy, self.gate)
-            self._register_agent_tool()
         except Exception:
             log.exception("screen/control tools unavailable")
 
@@ -190,25 +188,6 @@ class EVApp:
         """Put a line of the conversation on the pill's text card (only does anything in display mode)."""
         if self.display_mode:
             self.overlay.send_text(who, text, append)
-
-    def _register_agent_tool(self) -> None:
-        from ev.control.agent import ScreenAgent
-        from ev.tools.base import Tool, ToolResult
-
-        def observe() -> str:
-            tool = self.registry.get("read_screen")
-            return tool.func().message if tool else ""
-
-        def do_on_screen(goal: str) -> ToolResult:
-            agent = ScreenAgent(self.client, self.registry, self.gate, observe,
-                                max_steps=int(self.cfg["screen"]["agent_max_steps"]),
-                                narrate=self.say_direct)
-            r = agent.run(goal)
-            return ToolResult(r.ok, r.summary, {"steps": r.steps})
-
-        self.registry.register(Tool(
-            "do_on_screen", "Carry out a multi-step task on screen, like opening an app and typing in it.",
-            {"goal": {"type": "string", "maxLength": 300}}, do_on_screen, ("goal",), timeout_s=180))
 
     # ---- lifecycle
     def start(self) -> None:

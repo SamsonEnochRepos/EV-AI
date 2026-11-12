@@ -22,8 +22,6 @@ from ev.safety.policy import Verdict
     ("Type Hello World.", "type_text", {"text": "Hello World"}),
     ("switch to chrome window", "focus_window", {"title": "chrome"}),
     ("bring notepad to the front", "focus_window", {"title": "notepad"}),
-    ("open notepad and type hello", "do_on_screen", {"goal": "open notepad and type hello"}),
-    ("click the search box and type cats", "do_on_screen", {"goal": "click the search box and type cats"}),
 ])
 def test_screen_phrases_are_routed(said, tool, args):
     m = match_fast(said)
@@ -36,14 +34,13 @@ def test_screen_phrases_are_routed(said, tool, args):
 ])
 def test_vague_or_ordinary_speech_is_left_alone(said):
     m = match_fast(said)
-    assert m is None or m.tool not in {"click_element", "type_text", "press_keys", "scroll", "focus_window", "do_on_screen"}
+    assert m is None or m.tool not in {"click_element", "type_text", "press_keys", "scroll", "focus_window"}
 
 
 def test_what_do_you_see_alone_still_means_the_screen():
     assert match_fast("what do you see").tool == "read_screen"
     assert match_fast("can you look at my screen and tell me what's on it").tool == "read_screen"
     assert match_fast("summarize this page").tool == "read_screen"
-    assert match_fast("describe this image on my screen").tool == "screenshot_describe"
 
 
 def test_routed_calls_still_meet_the_policy(policy):

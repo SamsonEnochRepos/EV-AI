@@ -22,7 +22,6 @@ set_volume = "safe"
 web_search = "safe"
 get_weather = "safe"
 read_screen = "safe"
-screenshot_describe = "safe"
 remember_fact = "safe"
 forget_fact = "safe"          # a write to memory the user didn't plainly say (web/screen/note text, or words they never said) is escalated to a spoken yes in code: ev/safety/provenance.py
 recall = "safe"               # read-only search of the vault; results are wrapped as untrusted data
@@ -39,7 +38,6 @@ click_element = "safe"
 type_text = "safe"
 press_keys = "safe"
 paste = "safe"
-do_on_screen = "safe"
 run_shell = "blocked"
 delete_file = "confirm"
 move_file = "confirm"
@@ -103,7 +101,7 @@ confirm_control_patterns = [
 [confirm_patterns]
 # Anything that smells like administrator rights needs a spoken yes first, whatever the tool or who suggested it.
 # EV never elevates by itself: an approved "as administrator" launch still goes through Windows' own UAC prompt.
-tools = ["open_app", "open_website", "close_app", "click_element", "focus_window", "do_on_screen"]
+tools = ["open_app", "open_website", "close_app", "click_element", "focus_window"]
 args = ['\badmin(istrator|istrative)?\b', '\brun ?as\b', '\belevat(e|ed|ion)\b', '\bsudo\b', '\bsuper ?user\b', '\broot access\b']
 
 [blocked_patterns]
