@@ -173,7 +173,8 @@ class EVApp:
             return None, None
         from ev.tools.base import Tool, ToolResult
 
-        rules = Rules.load(self.cfg.root / str(ac.get("rules_file", "config/agent_rules.toml")))
+        rules = Rules.load(self.cfg.root / str(ac.get("rules_file", "config/agent_rules.toml")),
+                           strict_project_code=bool(ac.get("strict_project_code", False)))
         sup = AgentSupervisor(rules, self.cfg.data_path("agent_audit.jsonl"), ask=self._agent_ask, notify=self.overlay.send_notice,
                               publish=lambda e: self.hub.publish("agent", **e), ask_wait_s=float(ac.get("ask_wait_s", 25)))
         token = load_or_create_token(self.cfg.data_path("agent_token"))
@@ -194,8 +195,9 @@ class EVApp:
         def agents_allow(group: str, minutes: float = 60.0) -> ToolResult:
             if not sup.last_cwd:
                 return ToolResult(False, "I haven't seen a coding agent ask for anything yet, so I don't know which project you mean.")
+            project = Path(sup.pinned_cwd or sup.last_cwd).name           # the one named in the question, not whoever asked since
             label = sup.grant(group, minutes)
-            return ToolResult(True, f"Okay, the agents can {label} in {Path(sup.last_cwd).name} for {_span(minutes)}.")
+            return ToolResult(True, f"Okay, the agents can {label} in {project} for {_span(minutes)}.")
 
         self.registry.register(Tool("agents_control", "Pause, resume or report on answering coding agents' approval requests.", {
             "action": {"type": "string", "enum": ["pause", "resume", "status"]},
@@ -203,8 +205,12 @@ class EVApp:
         self.registry.register(Tool("agents_allow", "Let the coding agents do one kind of thing in their current project for a while.", {
             "group": {"type": "string", "enum": sorted(rules.groups)},
             "minutes": {"type": "number", "minimum": 1, "maximum": 240}}, agents_allow, ("group",), direct=True, llm_visible=False))
-        self.gate.describers["agents_allow"] = lambda a: (
-            f"let the coding agents {rules.groups.get(str(a.get('group')), {}).get('label', 'do that')} for {_span(float(a.get('minutes', 60)))}")
+        def describe_allow(a: dict[str, Any]) -> str:
+            project = Path(sup.pin_project()).name or "their current project"        # the project is fixed here, as the question is asked
+            what = rules.groups.get(str(a.get("group")), {}).get("label", "do that")
+            return f"let the coding agents {what} in {project} for {_span(float(a.get('minutes', 60)))}"
+
+        self.gate.describers["agents_allow"] = describe_allow
         return sup, AgentListener(sup, token, int(ac.get("port", 47831)))
 
     def _agent_ask(self, readback: str) -> bool | None:

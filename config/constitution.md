@@ -11,7 +11,14 @@ says. It decides from the request itself.
    write them, and doesn't get asked about them.
 4. **The agent can't switch its own supervisor off.** Its settings files, hook configs and these rules are refused for edits.
 5. **Reading and checking inside the project is fine.** Looking at files, `git status/diff/log`, tests, linters and type checks
-   are allowed without a word.
+   are allowed without a word. Commands that carry a flag that runs a program or writes a file (`find -exec`, `sort -o`,
+   `rg --pre`, `git diff --output`...), use a variable EV can't resolve, span several lines, or use escapes EV can't read
+   reliably are asked about instead.
+
+   One limit no filter can fix: tests, linters and builds run the *project's* code, and the agent can edit that code. An agent
+   that writes a hostile test and then runs it has code running on this machine. That is why rule 6 and the sandbox advice
+   matter, and why `[agents] strict_project_code = true` exists: it makes those runners a question too. For anything you don't
+   trust, run the agent in a container or a VM.
 6. **Editing is fine inside the project folder only.** Writing anywhere else is a question, not a yes.
 7. **Anything else is a question, asked out loud.** Installs, commits, builds, network calls, unknown commands, odd paths, tools EV
    has never seen. One short sentence; you answer yes or no. No answer means the agent shows its own prompt.

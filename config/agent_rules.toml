@@ -45,16 +45,41 @@ write_tools = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
 # Shell commands that only read or check. A command matches when its first words equal a prefix. Every `;`, `&&`, `||` and `|`
 # separated part must match, and a `>` to anywhere but nul is not allowed.
 commands = [
-  "ls", "dir", "pwd", "cd", "echo", "cat", "type", "head", "tail", "wc", "sort", "uniq", "tree", "where", "which", "whoami", "date",
+  "ls", "dir", "pwd", "cd", "echo", "cat", "type", "head", "tail", "wc", "sort", "tree", "where", "which", "whoami", "date",
   "get-childitem", "get-content", "get-location", "select-string", "findstr", "grep", "rg", "fd", "find", "stat", "file", "diff", "true",
   "git status", "git diff", "git log", "git show", "git blame", "git rev-parse", "git remote -v", "git config --get",
   "python --version", "python -V", "node --version", "node -v", "npm --version", "pip --version", "pip list", "pip show", "pip freeze",
+]
+# Test, lint and type-check runners. They are allowed because stopping an agent from running its tests makes it useless, but be
+# aware they execute the PROJECT'S code, which the agent can edit: an agent that writes a hostile test and then runs it gets code
+# running on this machine, and no command filter can see that. Set `[agents] strict_project_code = true` to have them asked about
+# instead (then only the read-only commands above are allowed without a question), or run the agent in a sandbox or container.
+project_code = [
   "python -m pytest", "pytest", "python -m ruff", "ruff check", "ruff format --check", "python -m mypy", "mypy", "python -m flake8",
   "python -m black --check", "python -m unittest", "npm test", "npm run test", "npm run lint", "npm run typecheck", "npm run check",
   "npx tsc --noEmit", "tsc --noEmit", "npx eslint", "npx jest", "npx vitest", "pnpm test", "pnpm lint", "pnpm run test", "pnpm run lint",
   "yarn test", "yarn lint", "cargo test", "cargo check", "cargo clippy", "go test", "go vet", "dotnet test", "mvn test", "gradle test",
   "make test", "make lint",
 ]
+
+# Flags that turn an otherwise read-only command into one that runs a program, writes a file or deletes. A command that carries
+# one of these is asked about, not allowed. `-x*` ends match by prefix; a bare short flag (-o) also matches inside a bundle (-ro).
+[allow.risky_flags]
+find = ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint*", "-fls"]
+fd = ["-x", "-X", "--exec", "--exec-batch"]
+rg = ["--pre", "--pre-glob", "--hostname-bin"]
+sort = ["-o", "--output", "--compress-program"]
+tree = ["-o"]
+date = ["-s", "--set"]
+"git diff" = ["--output*", "--ext-diff", "--textconv", "--no-index"]
+"git log" = ["--output*", "--ext-diff", "--textconv"]
+"git show" = ["--output*", "--ext-diff", "--textconv"]
+"git blame" = ["--output*", "--ext-diff", "--textconv", "--contents*"]
+"go test" = ["-exec", "-toolexec", "-o"]
+"go vet" = ["-vettool*", "-toolexec"]
+"cargo clippy" = ["--config*"]
+"cargo test" = ["--config*"]
+"cargo check" = ["--config*"]
 
 # Things that are fine to allow, but only because you said so by voice ("let Claude install packages for an hour"). Without that
 # they are asked about. Each is scoped to one project folder and expires.

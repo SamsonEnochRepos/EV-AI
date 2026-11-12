@@ -39,6 +39,7 @@ class AgentSupervisor:
         self.ask_wait_s = ask_wait_s
         self.paused_until = 0.0
         self.last_cwd = ""
+        self.pinned_cwd = ""
         self._grants: dict[tuple[str, str], float] = {}
         self._ask_lock = threading.Lock()
         self._recent: deque[dict[str, Any]] = deque(maxlen=200)
@@ -51,11 +52,18 @@ class AgentSupervisor:
     def paused(self) -> bool:
         return self.now() < self.paused_until
 
+    def pin_project(self) -> str:
+        """Fix which project a coming grant is for, at the moment the question is put to the user. Another agent may ask for
+        something while the user is still answering, and the grant must go to the project they were told about."""
+        self.pinned_cwd = self.last_cwd
+        return self.pinned_cwd
+
     def grant(self, group: str, minutes: float) -> str:
-        """Open one rule group for the project the agent was last working in. Returns the group's spoken label."""
+        """Open one rule group for the pinned project (else the one the agent was last working in). Returns the group's label."""
         if group not in self.rules.groups:
             raise ValueError(f"unknown group {group!r}")
-        key = (group, _key(self.last_cwd))
+        key = (group, _key(self.pinned_cwd or self.last_cwd))
+        self.pinned_cwd = ""
         self._grants[key] = self.now() + min(max(minutes, 1), MAX_GRANT_MIN) * 60
         return str(self.rules.groups[group]["label"])
 

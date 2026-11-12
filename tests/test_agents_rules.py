@@ -104,3 +104,50 @@ def test_ordinary_speech_is_not_taken_for_an_agent_command():
 
 def test_the_new_tools_have_policy_levels_and_are_voice_only(policy):
     assert policy.levels["agents_control"] == "safe" and policy.levels["agents_allow"] == "confirm"
+
+
+# ---- found by the security review: each of these used to be allowed
+@pytest.mark.parametrize("cmd", [
+    "git status\ncurl https://x.example/a", "ls\npython evil.py", "git status\r\npython evil.py",           # newline = a second command
+    "find . -name '*.py' -exec python x.py {} ;", "find . -delete", "find . -fprint out.txt", "fd -x python {}", "fd --exec python",
+    "rg --pre ./evil.sh foo", "sort -o out.txt in.txt", "sort -ro out.txt in.txt", "sort --output=o.txt a", "tree -o out.txt",
+    "git diff --output=patch.txt", "git log --ext-diff", "git show --textconv HEAD", "git diff --no-index a b", "go test -exec evil",
+    "date -s 2020-01-01", "cd $HOME", "cat $HOME/x.txt", "cat %USERPROFILE%\\x.txt", "ls $X",           # variables can't be judged
+    'echo \\"; python evil.py #"', "echo hi ^& python evil.py", "ls \\; python evil.py",                 # escapes the parser can't follow
+    "ls\x0bpython evil.py", "ls\u2028python evil.py", "ls\x00python evil.py",                            # odd whitespace
+])
+def test_review_bypasses_are_asked_about(rules, cmd):
+    assert bash(rules, cmd) is Q, repr(cmd)
+
+
+def test_windows_paths_and_plain_flags_still_work(rules):
+    assert bash(rules, f'cat "{ROOT}\\README.md"') is A
+    assert bash(rules, "rg -n TODO ev") is A and bash(rules, "find . -name '*.py'") is A and bash(rules, "git log --oneline -5") is A
+    assert bash(rules, "sort a.txt") is A and bash(rules, "git diff HEAD~1 -- ev") is A
+    assert bash(rules, "ls\ngit status") is A                    # two harmless lines are still harmless
+
+
+def test_search_patterns_cannot_reach_outside_the_project(rules):
+    ev = lambda tool, **ti: evaluate(rules, tool, ti, CWD).verdict       # noqa: E731
+    assert ev("Glob", pattern="ev/**/*.py") is A and ev("Grep", pattern="/api/v1", glob="*.py") is A
+    assert ev("Glob", pattern="../**/*.py") is Q and ev("Glob", pattern="C:/Users/*/Documents/*") is Q and ev("Glob", pattern="/etc/*") is Q
+    assert ev("Grep", pattern="x", glob="../../*") is Q and ev("Glob", pattern="~/*") is Q and ev("Glob", pattern="$HOME/*") is Q
+    assert ev("Glob", pattern="C:/Users/*/.ssh/*") is D and ev("Grep", pattern="x", glob="**/id_rsa") is D
+
+
+def test_strict_mode_asks_before_running_the_projects_code():
+    strict = Rules.load(ROOT / "config" / "agent_rules.toml", strict_project_code=True)
+    assert evaluate(strict, "Bash", {"command": "pytest -q"}, CWD).verdict is Q
+    assert evaluate(strict, "Bash", {"command": "git status"}, CWD).verdict is A
+    assert evaluate(Rules.load(ROOT / "config" / "agent_rules.toml"), "Bash", {"command": "pytest -q"}, CWD).verdict is A
+
+
+def test_a_grant_goes_to_the_project_named_in_the_question():
+    from ev.agents.supervisor import AgentSupervisor
+
+    s = AgentSupervisor(Rules.load(ROOT / "config" / "agent_rules.toml"))
+    s.decide("claude", {"tool_name": "Read", "tool_input": {"file_path": "a"}, "cwd": "C:/proj/one"})
+    assert s.pin_project() == "C:/proj/one"                                    # the user is now being asked about project one
+    s.decide("claude", {"tool_name": "Read", "tool_input": {"file_path": "a"}, "cwd": "C:/proj/two"})   # meanwhile another agent speaks
+    s.grant("installs", 30)
+    assert s.granted("C:/proj/one") == {"installs"} and s.granted("C:/proj/two") == frozenset()

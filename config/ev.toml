@@ -160,7 +160,8 @@ enabled = true
 port = 47831                   # fixed, because the agents' hook settings name it; loopback only, bearer token in data/agent_token
 rules_file = "config/agent_rules.toml"
 advisor = false                # true = check pip/npm installs against PyPI, npm and OSV.dev first (known vulnerabilities are refused). Off: it is new network traffic
-ask_wait_s = 25                # how long a second request waits for the question already being asked
+strict_project_code = false    # true = ask before the agent runs tests / linters / type checks too: they execute the project's code, which the agent can edit
+ask_wait_s = 25               # how long a second request waits for the question already being asked
 
 [dashboard]
 # A local page for watching EV and changing how it feels: http://127.0.0.1:<port>, opened by saying "open the dashboard" or from the
