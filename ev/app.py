@@ -152,9 +152,6 @@ class EVApp:
                                   on_artifact=self.memory.set_last_artifact)
             register_control_tools(self.registry, self.cfg, self.policy, self.gate)
             self._register_agent_tool()
-            from ev.vision.camera import register_camera_tool
-
-            register_camera_tool(self.registry, self.cfg, self.policy, self.client)
         except Exception:
             log.exception("screen/control tools unavailable")
 

@@ -298,7 +298,7 @@ def _skill_command(t: str) -> FastMatch | None:
     return None
 
 
-# ---- the screen and the camera. A 3B model rarely picks click_element or a camera look by itself, so the clear phrasings are
+# ---- the screen. A 3B model rarely picks click_element by itself, so the clear phrasings are
 # routed here in code. Every match still goes through the SafetyGate like any other call (sensitive windows, risky clicks
 # and key combos are decided there from the arguments, not from anything said here).
 _CTRL_WORD = r"(?:button|link|icon|tab|option|menu item|menu|checkbox|field|box|toggle|switch)"
@@ -314,16 +314,6 @@ _AMOUNT = {"lot": 10, "bit": 2, "little": 2, "way": 10}
 _MULTI_STEP = re.compile(
     _PRE + r"(?:open|launch|start|click|press|focus|switch to|select|scroll)\b.{2,120}?\s+(?:and|then|and then)\s+"
     r"(?:type|write|click|press|tap|scroll|select|fill|submit|send|save)\b.{1,150}" + _POST, re.I)
-
-_CAM_PLACE = r"(?:through|on|in|using|with|via|from) (?:the |my |your )?(?:camera|webcam|cam)"
-_CAMERA = re.compile(
-    _PRE + r"(?:what (?:am i|i am|i'm) (?:holding|wearing|showing(?: you)?|pointing at)"
-    r"|what(?:'s| is| are) (?:that|this|these|those|it)(?: thing| object| item)?(?: that)? (?:i'm|i am) (?:holding|showing(?: you)?|pointing at)"
-    r"|what(?:'s| is) (?:this|that|it) in my hands?|what(?:'s| is| do i have) in my hands?"
-    r"|(?:can|could|do) you see me|(?:look|have a look|take a look) at me|(?:how|what) do i look"
-    r"|(?:look|see) (?:at )?what i(?:'m| am) (?:holding|showing)|i(?:'m| am) (?:showing|holding up) (?:you )?(?:something|this|a|an|my)"
-    rf"|(?:look|see|show|tell|describe|what).{{0,40}}{_CAM_PLACE})(?:\b.{{0,60}})?" + _POST, re.I)
-
 
 def _key_combo(spoken: str) -> str | None:
     """"control s" / "ctrl plus shift t" / "enter" -> "ctrl+s" / "ctrl+shift+t" / "enter"; None if any word is not a key."""
@@ -347,12 +337,6 @@ def _target(raw: str) -> str | None:
     name = re.sub(r"\s+(?:for me|please|now|right now|there|here)$", "", name)
     name = re.sub(rf"(?:\s+{_CTRL_WORD})+$", "", name).strip(" .,!?")
     return None if not name or name in _NOT_A_TARGET or len(name.split()) > 6 else name
-
-
-def _camera_command(orig: str, t: str) -> FastMatch | None:
-    if _CAMERA.search(t):
-        return FastMatch("look_at_camera", {"question": orig[:200]}, "camera", then_llm=True)
-    return None
 
 
 def _screen_command(orig: str, t: str) -> FastMatch | None:
@@ -442,9 +426,6 @@ def match_fast(text: str) -> FastMatch | None:
     sk = _skill_command(t)
     if sk:
         return sk
-    cam = _camera_command(orig, t)
-    if cam:
-        return cam
     scr = _screen_command(orig, t)
     if scr:
         return scr

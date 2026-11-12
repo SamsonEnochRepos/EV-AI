@@ -1,14 +1,10 @@
-"""Screen, click and camera phrases are routed in code (ev/llm/fastpath.py), not left to a 3B model to pick a tool for."""
+"""Screen and click phrases are routed in code (ev/llm/fastpath.py), not left to a 3B model to pick a tool for."""
 from __future__ import annotations
 
 import pytest
 
-from ev.llm.brain import Brain
-from ev.llm.client import OllamaClient
 from ev.llm.fastpath import looks_like_question, match_fast
-from ev.safety.gate import SafetyGate
 from ev.safety.policy import Verdict
-from tests.fakes import FakeOllama, text_reply
 
 
 @pytest.mark.parametrize("said, tool, args", [
@@ -43,15 +39,6 @@ def test_vague_or_ordinary_speech_is_left_alone(said):
     assert m is None or m.tool not in {"click_element", "type_text", "press_keys", "scroll", "focus_window", "do_on_screen"}
 
 
-@pytest.mark.parametrize("said", [
-    "what am I holding", "can you see me", "how do I look", "look at me", "what's this thing I'm holding",
-    "what do you see on the camera", "hey ev what am i wearing",
-])
-def test_camera_phrases(said):
-    m = match_fast(said)
-    assert m is not None and m.tool == "look_at_camera" and m.then_llm and m.args["question"].startswith(said[:10])
-
-
 def test_what_do_you_see_alone_still_means_the_screen():
     assert match_fast("what do you see").tool == "read_screen"
     assert match_fast("can you look at my screen and tell me what's on it").tool == "read_screen"
@@ -65,16 +52,6 @@ def test_routed_calls_still_meet_the_policy(policy):
     assert policy.evaluate("press_keys", match_fast("press alt f4").args).verdict is Verdict.BLOCK
     assert policy.evaluate("press_keys", match_fast("press enter").args).verdict is Verdict.CONFIRM
     assert policy.evaluate("click_element", match_fast("click the password field").args).verdict is Verdict.BLOCK
-    assert policy.evaluate("look_at_camera", {"question": "what am i holding"}).verdict is Verdict.ALLOW
-
-
-def test_asking_for_the_camera_when_it_is_off_says_so(cfg, memory, policy, registry):
-    """With the camera tool not registered, the model must not be left to guess what it can "see"."""
-    fake = FakeOllama([text_reply("You are holding a cup.")])
-    brain = Brain(cfg, OllamaClient(cfg, transport=fake.transport()), memory, registry, SafetyGate(policy), persona="You are EV.")
-    said: list[str] = []
-    res = brain.respond("what am I holding", on_sentence=said.append)
-    assert "camera is turned off" in res.text and said == [res.text] and not fake.requests
 
 
 @pytest.mark.parametrize("said", ["Can you do that for me?", "try that again", "go ahead and do it", "can you redo it please"])

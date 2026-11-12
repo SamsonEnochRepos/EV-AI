@@ -178,7 +178,7 @@ class Brain:
         self.max_sentences_detail = int(llm.get("reply_max_sentences_detail", 6))
         self.direct_replies = bool(llm.get("direct_tool_replies", False))
         self.filler_after_s = float(llm.get("filler_after_s", 1.3))
-        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather", "read_screen", "screenshot_describe", "look_at_camera"]))
+        self.filler_tools = frozenset(llm.get("filler_tools", ["web_search", "get_weather", "read_screen", "screenshot_describe"]))
         self.rewarm_after_s = float(llm.get("rewarm_after_s", 90))
         self.lookup_planner = bool(llm.get("lookup_planner", True))
         self.deep_model = str(llm.get("deep_model", "") or "")      # "" = no bigger model; used only when the user asks for it
@@ -401,11 +401,6 @@ class Brain:
             on_sentence(done.text)
             return done
         forced = (skill or match_fast(user_text)) if allow_fast else None   # matched once: it serves the fast path and the forced call
-        if forced and forced.tool == "look_at_camera" and forced.tool not in self.registry.names():
-            off = "The camera is turned off in my settings, so I can't look."          # don't let the model guess what it "sees"
-            self._remember_turn(user_text, off)
-            on_sentence(off)
-            return TurnResult(off, fast_path=True)
         if forced and forced.tool == "review_facts":
             reviewed = self._review_facts(user_text, filler)
             on_sentence(reviewed.text)
