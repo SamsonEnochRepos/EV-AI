@@ -99,6 +99,11 @@ class Policy:
         self.protected_apps = {_compact(a) for a in apps.get("protected", [])}      # close_app never touches these
         self.no_force_apps = {_compact(a) for a in apps.get("no_force", [])}        # may be closed politely, never killed
         self.trusted_hosts = [h.lower().lstrip(".") for h in data.get("web", {}).get("trusted_hosts", [])]
+        proj = data.get("projects", {})
+        self.project_roots = [Path(r) for r in proj.get("roots", [])]
+        self.project_skip = frozenset(str(s).lower() for s in proj.get("skip", []))
+        self.conda_envs = frozenset(str(e) for e in proj.get("conda_envs", []))
+        self.coding_agents = frozenset(str(a) for a in proj.get("coding_agents", []))
         cp = data.get("confirm_patterns", {})
         self.confirm_res = [re.compile(p, re.I) for p in cp.get("args", [])]
         self.confirm_pattern_tools = set(cp.get("tools", []))
@@ -199,6 +204,11 @@ class Policy:
             if d is not None:
                 return d
 
+        if tool == "open_project":
+            d = self._project(args)
+            if d is not None:
+                return d
+
         if tool == "close_app":
             d = self._close_app(args)
             if d is not None:
@@ -207,7 +217,7 @@ class Policy:
         if tool == "run_shell" and not self.shell_enabled:
             return Decision(Verdict.BLOCK, "shell is disabled")
 
-        if tool in ("click_element", "type_text", "paste", "press_keys", "focus_window"):
+        if tool in ("click_element", "type_text", "paste", "press_keys", "focus_window", "switch_tab"):
             for key in ("name", "control", "target", "window", "title"):
                 v = str(args.get(key, "")).lower()
                 if v and any(p in v for p in self.ctl_patterns + self.win_patterns):
@@ -255,6 +265,34 @@ class Policy:
             if args.get("url") or args.get("site"):
                 return Decision(Verdict.CONFIRM, f"open {web.host_of(target)}, which isn't a site I know")
         return None
+
+    def _project(self, args: dict[str, Any]) -> Decision | None:
+        """open_project takes a folder *name* and one of three ways to open it. No path, flag or command can get through:
+        the name is plain words, `how` is one of three, and `env` must be on the list in policy.toml."""
+        name = str(args.get("name", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}", name) or ".." in name:
+            return Decision(Verdict.BLOCK, "invalid folder name")
+        if str(args.get("how", "folder")) not in ("vscode", "folder", "terminal"):
+            return Decision(Verdict.BLOCK, "unknown way to open a folder")
+        env = str(args.get("env", "")).strip()
+        if env and (str(args.get("how")) != "terminal" or env not in self.conda_envs):
+            return Decision(Verdict.BLOCK, "that environment isn't on my list")
+        agent = str(args.get("agent", "")).strip()
+        if agent and (str(args.get("how")) != "terminal" or env or agent not in self.coding_agents):
+            return Decision(Verdict.BLOCK, "that coding agent isn't on my list, or can't start there")
+        if not self.project_roots:
+            return Decision(Verdict.BLOCK, "no project folders are set up")
+        return None
+
+    def is_project_folder(self, path: Path) -> bool:
+        """Is `path` a real folder (no symlink or junction) directly inside one of [projects] roots, the only places open_project reaches?"""
+        try:
+            if path.is_symlink() or getattr(path, "is_junction", lambda: False)() or not path.is_dir():
+                return False
+            parent = os.path.normcase(str(path.resolve(strict=True).parent))
+            return any(os.path.normcase(str(r.resolve())) == parent for r in self.project_roots)
+        except OSError:
+            return False
 
     def _trusted_host(self, host: str) -> bool:
         host = host.lower()

@@ -64,6 +64,7 @@ _PLANNER_PROMPT = (
     "what they mean. Speech recognition makes mistakes, so drop garbled words that do not fit the topic. Add the word "
     "'latest' after the topic words when the question is about something recent, but never reply with 'latest' alone.\n"
     "Reply NONE for chit-chat, opinions, advice, maths, facts that never change, questions about the user or the assistant, "
+    "the current time, date or day (the assistant already knows them), "
     "and requests to do something ('can you do that for me', 'try again', 'go ahead').")
 _PLANNER_TURNS = 2           # earlier user/assistant pairs the planner may see
 _PLANNER_NONE = re.compile(r"^\W*(none|no|n/a)\b", re.I)
@@ -102,6 +103,16 @@ _REQUEST_LIKE = re.compile(
     r"^\W*(?:(?:please|hey|ok|okay|alright|yes|yeah|and|so|now)\W+)*(?:(?:can|could|would|will) you|please|(?:" + _DO + r")\b)|"
     r"\b(?:go ahead|do (?:that|it)|try (?:that|it|again)|again|not (?:actually )?doing|didn'?t (?:do|open|work|play)|haven'?t|"
     r"don'?t see|isn'?t (?:open|working|there)|not (?:open|switched|there|working))\b", re.I)
+# "Controlled playback to play ...", "Started playing it": a past-tense report of an action that no tool performed
+_CLAIM_DONE_PLAY = re.compile(r"\b(?:controlled|started|resumed|toggled|began)\s+(?:the\s+)?(?:playback|playing|music|song|video)\b", re.I)
+# the user's own words ask for the time, date or day: answered by get_time_date, never by a web search
+_ASKS_CLOCK = re.compile(r"\b(?:what(?:'s|s| is)?\s+(?:the\s+)?(?:current\s+)?(?:time|date|day)|(?:current|today'?s)\s+(?:time|date|day)|"
+                         r"(?:tell|give|show) me (?:the\s+)?(?:current\s+)?(?:time|date|day)|"
+                         r"time and date|date and time|what day (?:is it|it is))\b", re.I)
+# a request that points back at what EV just did ("play it", "do that again", "the same song")
+_POINTS_BACK = re.compile(r"\b(?:it|that|this|same|again|one|there|them)\b", re.I)
+# tools whose last successful call is remembered, so the next turn knows what "it" is
+_TRACKED_ACTIONS = frozenset({"open_website", "open_app", "close_app", "open_project", "media_control"})
 _NUDGE = ("[system note, not from the user] You said you would do something but called no tool, so nothing happened. If a tool can "
           "do what the user asked, call it now. If none can, say so plainly in one short sentence. Never say something is done unless a tool did it.")
 _NOT_DONE = "I wasn't able to do that one. Could you put it another way?"
@@ -112,7 +123,7 @@ def claims_action(sentence: str, user_text: str) -> bool:
     s = sentence.strip()
     if _CLAIM_SOON.search(s):
         return True
-    return bool(_CLAIM_DONE.search(s) and not _RECAP_Q.search(user_text.strip()))
+    return bool((_CLAIM_DONE.search(s) or _CLAIM_DONE_PLAY.search(s)) and not _RECAP_Q.search(user_text.strip()))
 
 
 @dataclass
@@ -149,6 +160,9 @@ class Brain:
             gate.describers["keep_fact"] = lambda a: vault.describe_unconfirmed(str(a.get("id", "")))
         self.persona = persona if persona is not None else cfg.path("general", "persona_file").read_text(encoding="utf-8")
         self.history: list[dict[str, Any]] = []
+        # What EV last did that the user may mean by "it" ({"tool", "args", "message"}). History keeps only spoken words, so
+        # without this "play it" after a YouTube search has nothing to point at. Code (fastpath) and the model both read it.
+        self.last_action: dict[str, Any] | None = None
         self.max_steps = int(cfg.get("general", "max_tool_steps", 5))
         self.history_turns = int(cfg.get("llm", "history_turns", 6))
         self.facts_limit = int(cfg.get("memory", "max_facts_in_prompt", 12))
@@ -156,6 +170,7 @@ class Brain:
         self.detector = InjectionDetector(gate.policy.d.get("injection", {}).get("phrases"))
         self.now = now
         self.turns = 0
+        self._summarized_at = 0                  # turn count when the summary was last rewritten
         llm = cfg["llm"]
         self.ctx_budget = int(llm["num_ctx"]) - int(llm["num_predict"]) - 128   # leave room for the reply + template
         self.max_sentences = int(llm.get("reply_max_sentences", 2))
@@ -219,7 +234,19 @@ class Brain:
         parts: list[str] = []
         if recalled := self._auto_recall(user_text):
             parts.append(recalled)
+        if (note := self._last_action_note(user_text)):
+            parts.append(note)
         return "\n\n".join(parts)
+
+    def _last_action_note(self, user_text: str) -> str:
+        """One line saying what EV just did, added only when the request points back ("play it", "the same song on Spotify")."""
+        last = self.last_action
+        if not last or not _POINTS_BACK.search(user_text):
+            return ""
+        shown = ", ".join(f"{k}={str(v)[:60]}" for k, v in (last.get("args") or {}).items())
+        return (f"[system note, not from the user] Your last action was {last['tool']}({shown}), result: "
+                f"\"{str(last.get('message', ''))[:100]}\". If the user says it, that or the same one, they mean this. "
+                f"Do the new request by calling a tool.")
 
     def _auto_recall(self, user_text: str) -> str:
         """Optional (vault.auto_recall, off by default): a few snippets of the user's own notes beside their request. They go
@@ -249,8 +276,16 @@ class Brain:
         return [system, *hist, user]
 
     def _names_a_tool(self, sentence: str) -> bool:
-        """Small models narrate "I can use the web_search tool..."; internal tool names are never spoken."""
-        return any(n in sentence for n in self.registry.names() if "_" in n)
+        """Small models narrate "I can use the web_search tool..."; internal tool names are never spoken. Case doesn't matter:
+        a 3B model once wrote a call as the sentence "Open_website spotify, query shape of you"."""
+        low = sentence.lower()
+        return any(n in low for n in self.registry.names() if "_" in n)
+
+    def _is_written_call(self, sentence: str) -> bool:
+        """A sentence that is a tool call written out as words ("Open_website spotify, query ...") instead of being made.
+        Like a promise with no action behind it, it is held back and the model is told to make the call."""
+        low = sentence.lower().lstrip(" \t\"'`*-")
+        return any(low.startswith(n) for n in self.registry.names() if "_" in n)
 
     # ---- warm-up: keep Ollama's prompt cache holding the real system prompt + tool list
     def warm(self) -> None:
@@ -284,7 +319,7 @@ class Brain:
     # ---- fast path
     def try_fast(self, text: str) -> TurnResult | None:
         self.turn.begin_turn(text)
-        return self._run_fast(text, match_fast(text))
+        return self._run_fast(text, match_fast(text, self.last_action))
 
     def _run_fast(self, text: str, fm: FastMatch | None, filler: Callable[[], None] | None = None) -> TurnResult | None:
         if not fm or fm.then_llm or fm.tool not in self.registry.names():
@@ -319,6 +354,8 @@ class Brain:
         like "what was its name?" becomes a standalone search. Any failure falls back to the normal tool-calling path."""
         if not (self.lookup_planner and "web_search" in self.registry.names() and looks_like_question(text)):
             return None
+        if _ASKS_CLOCK.search(text):
+            return None            # the clock is get_time_date's job; a web search once answered with the wrong date
         recent = "\n".join(f"{'User' if m['role'] == 'user' else 'Assistant'}: {str(m['content'])[:300]}"
                            for m in self.history[-_PLANNER_TURNS * 2:] if m.get("content"))
         ask = (f"Earlier conversation:\n{recent}\n\n" if recent else "") + f"Latest user message: {text}\nSearch query or NONE:"
@@ -364,7 +401,7 @@ class Brain:
             done = self._run_compound(user_text, steps, filler)
             on_sentence(done.text)
             return done
-        forced = match_fast(user_text) if allow_fast else None   # matched once: it serves the fast path and the forced call
+        forced = match_fast(user_text, self.last_action) if allow_fast else None   # matched once: it serves the fast path and the forced call
         if forced and forced.tool == "review_facts":
             reviewed = self._review_facts(user_text, filler)
             on_sentence(reviewed.text)
@@ -424,7 +461,7 @@ class Brain:
                             # Only stream speech if this turn is not turning into a tool call.
                             if not calls and not _looks_like_tool_json("".join(text_parts)):
                                 for s, whole in splitter.feed_ex(ch.text):
-                                    if claimed or (not result.tool_log and claims_action(s, user_text)):
+                                    if claimed or (not result.tool_log and (claims_action(s, user_text) or self._is_written_call(s))):
                                         claimed = True                  # "I'll open it": not spoken unless a tool call follows
                                         continue                        # (the tool call, if any, comes after the text in the stream)
                                     if sentences < limit and (s := spoken_text(s)) and not self._names_a_tool(s):
@@ -445,7 +482,7 @@ class Brain:
                     if calls:
                         full = ""
                 tail = [] if calls or capped or claimed else splitter.flush()          # the last sentence, which had no full stop
-                if tail and not result.tool_log and any(claims_action(t, user_text) for t in tail):
+                if tail and not result.tool_log and any(claims_action(t, user_text) or self._is_written_call(t) for t in tail):
                     claimed = True
                 if not calls and claimed:
                     if not nudged and step < self.max_steps:
@@ -613,6 +650,8 @@ class Brain:
             finally:
                 self.on_acting(False)
             self._finish(entry, tool, res)
+            if res.ok and name in _TRACKED_ACTIONS:
+                self.last_action = {"tool": name, "args": dict(entry["args"]), "message": res.message}
         entry["ms"] = (time.perf_counter() - t0) * 1000               # includes the wait for a spoken yes, if one was needed
         self._tool_done(entry, source)
         return entry
@@ -709,13 +748,30 @@ class Brain:
 
         threading.Thread(target=run, name="summary", daemon=True).start()
 
+    def finish_session(self) -> bool:
+        """Save what this session was about when it ends. The summary is otherwise written every few turns, so a short
+        chat would leave nothing behind. Returns True if a summary was written; never raises."""
+        if self.turns - self._summarized_at < 2:
+            return False
+        try:
+            self.update_summary()
+        except LLMError:
+            log.warning("end-of-session summary skipped")
+            return False
+        except Exception:
+            log.exception("end-of-session summary failed")
+            return False
+        return True
+
     def update_summary(self) -> None:
         old = self.memory.get_kv("summary")
         recent = list(self.history[-self.history_turns * 2:])       # a copy: the next turn may append while this runs
         convo = "\n".join(f"{m['role']}: {m['content']}" for m in recent if m.get("content"))
-        prompt = [{"role": "system", "content": "Update the running summary of a conversation between a user and their assistant EV. Keep every durable fact about the user (names, preferences, plans). Max 80 words. Output only the summary."},
+        prompt = [{"role": "system", "content": "Update the running summary of a conversation between a user and their assistant EV. Keep every durable fact about the user (names, preferences, plans, projects, ongoing work, things they asked to be remembered). Leave out routine actions such as opening apps, sites or videos, and one-off chit-chat. Max 80 words. Output only the summary."},
                   {"role": "user", "content": f"Current summary: {old or '(none)'}\n\nRecent conversation:\n{convo}"}]
+        done_at = self.turns
         r = self.client.chat(prompt, options={"num_predict": 140, "temperature": 0.2})
+        self._summarized_at = done_at
         if r.text.strip():
             self.memory.set_kv("summary", r.text.strip()[:700])
             if self.vault is not None and self.cfg.get("vault", "daily_summaries", True) \

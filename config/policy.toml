@@ -18,6 +18,7 @@ set_display_mode = "safe"     # toggles the on-screen text card; touches nothing
 set_timer = "safe"
 set_reminder = "safe"
 media_control = "safe"
+open_project = "safe"         # opens a folder (a name, never a path) from [projects] roots in VS Code, File Explorer or a terminal; it runs nothing but "conda activate <listed env>"
 set_volume = "safe"
 web_search = "safe"
 get_weather = "safe"
@@ -31,7 +32,9 @@ agents_allow = "confirm"      # voice only: opens one rule group (installs, comm
 open_dashboard = "safe"        # voice only: opens EV's own loopback page in the browser (a one-time sign-in link; see SECURITY.md)
 keep_fact = "confirm"         # voice only (not in the model's tool list): keep a hand-edited line of Facts.md as a fact. Always a spoken yes
 take_note = "safe"
-focus_window = "safe"
+focus_window = "safe"         # voice only: brings an app's window to the front (by app name, "the browser" or "the previous window")
+switch_tab = "safe"           # voice only: selects an open browser tab by words of its title; reads tab names, types and clicks nothing
+trust_agent_folder = "safe"   # voice only: presses Enter on Claude Code's "trust this folder?" only when the terminal in front shows that exact prompt for a folder directly inside [projects] roots, with Yes highlighted
 scroll = "safe"
 copy_selection = "safe"
 # Control tools are "safe" at the tool level; arg-level rules in [control] escalate to
@@ -64,6 +67,17 @@ protected = [
   "windows defender", "defender", "ollama", "ollama app",
 ]
 no_force = ["explorer", "file explorer", "taskmgr", "task manager"]   # fine to close politely, never kill
+
+[projects]
+# open_project may open a folder that sits directly inside one of these places, by name. Earlier places win when two folders
+# share a name. Nothing deeper, no typed paths, no symlinks. Names in `skip` are never matched.
+roots = ["D:/Projects", "D:/Games", "D:/"]
+skip = ["$RECYCLE.BIN", "System Volume Information", "Recovery"]
+# The only environments a terminal may activate (conda lives on C:). Anything else is refused.
+conda_envs = ["aidetector", "er", "ev", "ml", "paddleocr", "sih26168", "torch", "voice-agent"]
+# Coding-agent CLIs a terminal may start in a project ("start Claude Code in GNSS"). The program for each name is fixed in
+# ev/tools/system.py (AGENT_CLIS); it starts with no prompt and no flags, so it just waits for you. Empty list = off.
+coding_agents = ["claude", "antigravity"]
 
 [web]
 # open_website opens these (and their subdomains) without asking, besides the built-in sites (YouTube, Google, GitHub...).

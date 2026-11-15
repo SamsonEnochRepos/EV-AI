@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ev.tools.web import BROWSERS, SITE_ALIASES, SITES
+from ev.tools.web import BROWSERS, SITE_ALIASES, SITES, canonical_site
 
 _NUM_WORDS = {
     "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -73,8 +73,9 @@ _ON_V = r"(?:activate|enable|turn on|switch on|start|show|enter)"
 _OFF_V = r"(?:deactivate|disable|turn off|switch off|stop|hide|exit|leave|end|close)"
 
 # Whisper keeps the "Yeah, so" / "okay, um" in front of a request, so a few leading fillers don't stop a match.
-_PRE = (r"^\s*(?:(?:yeah|yes|yep|okay|ok|so|well|um|uh|and|now|alright|all right)[, ]+){0,2}"
-        r"(?:(?:hey |oh |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?:please |can you |could you |would you )?")
+_PRE = (r"^\s*(?:(?:yeah|yes|yep|okay|ok|so|well|um|uh|and|now|alright|all right|great|cool|nice|awesome|perfect"
+        r"|that'?s (?:great|cool|nice|awesome|perfect|good))[, ]+){0,2}"
+        r"(?:(?:hey |oh |ok(?:ay)? )?(?:evie|ev)[, ]+)?(?:please |can (?:you|u) |could (?:you|u) |would (?:you|u) )?")
 _POST = r"[\s.!?]*(?:please)?[\s.!?]*$"
 
 # "remember that my dog's name is Biscuit": matched on the transcript as spoken (case kept), and the value is the user's own
@@ -126,7 +127,7 @@ _THIS = r"(?:this|that|it|this window|that window|the window|current window|acti
 
 def _site_command(t: str) -> FastMatch | None:
     """"open youtube", "open firefox and search youtube for X", "search for X on reddit", "go to example.com"."""
-    def args(site: str, q: str | None, b: str | None, url: str = "") -> dict[str, Any]:
+    def args(site: str, q: str | None, b: str | None, url: str = "", verb: str | None = None) -> dict[str, Any]:
         a: dict[str, Any] = {"site": site} if site else {}
         if url:
             a["url"] = url
@@ -134,23 +135,26 @@ def _site_command(t: str) -> FastMatch | None:
             a["query"] = q.strip(" .,")
         if b:
             a["browser"] = b
+        if q and verb in ("play", "watch") and canonical_site(site) == "youtube":
+            a["play"] = True                       # "play X on youtube" starts the top video; "search" only opens results
         return a
 
     m = re.search(
         _PRE + rf"(?:{_OPEN_V}\s+(?:the\s+)?(?P<b1>{_BROWSER})(?:{_AND}))?(?:{_OPEN_V}\s+(?:the\s+)?)?"
         rf"(?P<site>{_SITE})(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b2>{_BROWSER}))?"
-        rf"(?:{_AND}{_FIND_V}\s+(?:for\s+)?(?P<q>.+?))?(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b3>{_BROWSER}))?" + _POST, t)
-    if m and re.search(rf"\b{_OPEN_V}\b", t):
-        return FastMatch("open_website", args(m["site"], m["q"], m["b1"] or m["b2"] or m["b3"]), "site")
+        rf"(?:{_AND}(?P<v1>{_FIND_V})\s+(?:for\s+)?(?P<q>.+?))?(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b3>{_BROWSER}))?" + _POST, t)
+    # "open spotify" alone is the Spotify app (open_app); only "open spotify and play X" is a site search
+    if m and re.search(rf"\b{_OPEN_V}\b", t) and not (canonical_site(m["site"]) == "spotify" and not m["q"]):
+        return FastMatch("open_website", args(m["site"], m["q"], m["b1"] or m["b2"] or m["b3"], verb=m["v1"]), "site")
 
     m = re.search(
-        _PRE + rf"{_FIND_V}\s+(?:for\s+)?(?P<q>.+?)\s+(?:on|in|at)\s+(?:the\s+)?(?P<site>{_SITE})"
+        _PRE + rf"(?P<v>{_FIND_V})\s+(?:for\s+)?(?P<q>.+?)\s+(?:on|in|at)\s+(?:the\s+)?(?P<site>{_SITE})"
         rf"(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b>{_BROWSER}))?" + _POST, t)
     if m is None:
-        m = re.search(_PRE + rf"{_FIND_V}\s+(?:on\s+)?(?P<site>{_SITE})\s+for\s+(?P<q>.+?)"
+        m = re.search(_PRE + rf"(?P<v>{_FIND_V})\s+(?:on\s+)?(?P<site>{_SITE})\s+for\s+(?P<q>.+?)"
                       rf"(?:\s+(?:in|on|with)\s+(?:the\s+)?(?P<b>{_BROWSER}))?" + _POST, t)
     if m and m["site"].removesuffix(".com") not in _NOT_ANSWER_SITES:
-        return FastMatch("open_website", args(m["site"], m["q"], m["b"]), "site_search")
+        return FastMatch("open_website", args(m["site"], m["q"], m["b"], verb=m["v"]), "site_search")
 
     m = re.search(_PRE + rf"(?:{_OPEN_V}|visit)\s+(?:the\s+)?(?P<b>{_BROWSER})(?:{_AND})(?:search(?: for| up)?|look up|google)\s+(?P<q>.+?)" + _POST, t)
     if m:
@@ -301,11 +305,68 @@ def _target(raw: str) -> str | None:
     return None if not name or name in _NOT_A_TARGET or len(name.split()) > 6 else name
 
 
+_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8}
+_DIGIT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_TAB_NOT_A_NAME = frozenset("next previous last first this that another other new same current open a the my".split())
+_SWITCH = r"(?:switch|go|jump|move|flip|change)"
+_APP_WORD = r"[a-z0-9][a-z0-9 .+-]{1,40}?"
+# "go to ..." also means a website or a project folder, so it only counts as a window for apps people name this way
+_GO_TO_APP = r"(?:browser|vs ?code|visual studio code|firefox|chrome|edge|terminal|notepad|file explorer|explorer|spotify|discord)"
+
+
+def _tab_command(t: str) -> FastMatch | None:
+    """Browser (and editor) tabs: "next tab", "go to the third tab", "switch to the YouTube tab". Next, previous and numbers are
+    the browser's own shortcuts; a tab by name is looked up in the browser's tab strip by switch_tab."""
+    m = re.search(_PRE + rf"(?:{_SWITCH} to )?(?:the )?(?P<d>next|previous) tab" + _POST, t) or re.search(
+        _PRE + rf"{_SWITCH} (?:the )?tabs?" + _POST, t)
+    if m:
+        return FastMatch("press_keys", {"combo": "ctrl+pageup" if m.groupdict().get("d") == "previous" else "ctrl+pagedown"}, "tab_step")
+    m = re.search(_PRE + rf"{_SWITCH} to (?:the )?(?:(?P<o>first|second|third|fourth|fifth|sixth|seventh|eighth|last) tab"
+                  r"|tab (?P<n>[1-9]|one|two|three|four|five|six|seven|eight|nine))" + _POST, t)
+    if m:
+        if m["o"] == "last":
+            return FastMatch("press_keys", {"combo": "ctrl+9"}, "tab_last")          # the browsers' own "last tab"
+        n = _ORDINALS.get(m["o"] or "") or (int(m["n"]) if m["n"].isdigit() else _DIGIT_WORDS[m["n"]])
+        return FastMatch("press_keys", {"combo": f"ctrl+{n}"}, "tab_number")
+    m = re.search(_PRE + rf"(?:{_SWITCH} to|open|show|pull up|bring up) (?:the |my )?(?P<n>{_APP_WORD}) tab" + _POST, t)
+    if m and not set(m["n"].split()) & _TAB_NOT_A_NAME:
+        return FastMatch("switch_tab", {"name": m["n"].strip()}, "tab_named")
+    return None
+
+
+def _window_command(t: str) -> FastMatch | None:
+    """"switch back to the browser", "go back to VS Code", "switch back", "alt tab": the previous or a named app's window."""
+    if re.search(_PRE + r"(?:switch back|alt[ -]?tab|(?:switch|go) (?:to|back to) (?:the )?(?:previous|last|other) (?:window|app))" + _POST, t):
+        return FastMatch("focus_window", {"title": "previous"}, "window_previous")
+    m = (re.search(_PRE + rf"(?:(?:switch|go|jump|flip|come) back to|take me back to|bring me back to|return to)\s+(?:the |my )?"
+                   rf"(?P<n>{_APP_WORD})(?: window| app| application)?" + _POST, t)
+         or re.search(_PRE + rf"go to (?:the )?(?P<n>{_GO_TO_APP})(?: window| app)?" + _POST, t))
+    if m and not re.search(r"\b(?:tab|tabs|mode|theme)\b", m["n"]):
+        return FastMatch("focus_window", {"title": m["n"].strip()}, "window_named")
+    return None
+
+
+# "trust this folder", "yes I trust it", "accept the trust prompt": the answer to Claude Code's trust question, whole utterance only.
+# trust_agent_folder checks the screen itself, so these words only start the check; "accept it" alone is far too loose and is not here.
+_OBJ = r"(?:this|the|that|it)(?:\s+(?:folder|project|workspace|directory|repo|repository))?"
+_TRUST_Q = re.compile(
+    _PRE + r"(?:(?:yes|yeah|yep|yup|ok|okay|sure)[,.]?\s+)?(?:(?:i|we)\s+)?"
+    rf"(?:trust\s+{_OBJ}(?:\s+(?:for|in|with)\s+claude(?:\s+code)?)?"
+    r"|(?:accept|answer|confirm)\s+(?:the\s+|this\s+)?(?:folder\s+)?trust(?:\s+(?:prompt|dialog|dialogue|question|screen|check))?"
+    r"|(?:say\s+yes|click\s+yes|press\s+yes)\s+(?:to|on)\s+(?:the\s+|this\s+)?(?:folder\s+)?trust(?:\s+(?:prompt|dialog|dialogue|question|screen|check))?)"
+    + _POST)
+
+
 def _screen_command(orig: str, t: str) -> FastMatch | None:
     """Clicking, typing, keys, scrolling and switching windows said plainly."""
+    if _TRUST_Q.match(t):
+        return FastMatch("trust_agent_folder", {}, "trust_agent")
     m = re.search(_PRE + r"(?:press|hit|push|tap)\s+(?P<k>[a-z0-9 +]{1,40}?)" + _POST, t)
     if m and (combo := _key_combo(m["k"])):
         return FastMatch("press_keys", {"combo": combo}, "keys")
+    cmd = _tab_command(t) or _window_command(t)
+    if cmd:
+        return cmd
     m = re.search(_PRE + rf"(?:double[ -])?click(?: on)?\s+(?P<n>{_TARGET_WORD})" + _POST, t)
     if m is None:
         m = re.search(_PRE + rf"(?:tap|press|hit|push|select|choose)(?: on)?\s+(?:the |that |my )?(?P<n>{_TARGET_WORD})\s+{_CTRL_WORD}" + _POST, t)
@@ -352,13 +413,147 @@ def _agent_command(t: str) -> FastMatch | None:
     return None
 
 
-def match_fast(text: str) -> FastMatch | None:
+# "as admin", "as an administrator", "with admin rights", "in admin mode" at the end of an open request
+_ASK_ADMIN = re.compile(r"\s+(?:as|with|in)\s+(?:an?\s+)?admin(?:istrator)?(?:\s+(?:rights|privileges|permissions|mode|access))?(?=[\s.!?]*(?:please)?[\s.!?]*$)")
+
+# ---- folders on the D drive: "open CLM in VS Code", "open the Riot Games folder", "open EV_AI in the terminal with the ev
+# environment", "go to EV_AI and activate the ev environment". The folder is a name; open_project finds it on disk, and the
+# policy only lets a terminal activate an environment from its list.
+_EDITOR = r"(?:vs ?code|visual studio code|code)"
+_TERM = r"(?:(?:windows )?terminal|power ?shell|command (?:line|prompt)|cmd|shell)"
+_FNAME = r"[a-z0-9][a-z0-9 ._-]{0,40}?"
+_FWORD = r"(?:\s+(?:project|folder|directory|repo|repository))*"
+_DRIVE = r"(?:\s+(?:from|on|in|at)\s+(?:my\s+|the\s+)?d(?:\s*:)?\s*drive)?"
+_ENVTAIL = (r"(?:(?:\s*,\s*|\s+)(?:and\s+|then\s+)*(?:with|activate|activating|using)\s+(?:the\s+)?(?:conda\s+)?"
+            r"(?P<env>[a-z0-9_-]{1,30})(?:\s+(?:conda\s+)?(?:environment|env))?(?:\s+(?:activated|active))?)?")
+_NOT_A_FOLDER = frozenset("it that this them there here one something anything vscode vs code terminal powershell shell cmd".split())
+_OWN_VERB = re.compile(r"(?:play|watch|search|find|look up|pause|resume|skip|turn|set|type|click|press|scroll|go|remind)\b")
+_ENV_ONLY = re.compile(r"^(?:and |then )*(?:activate|activating)\b")
+
+
+# "start Claude Code in GNSS", "can u initialize a claude code env inside the GNSS project", "open EV_AI with antigravity".
+# Only the coding CLIs named in AGENT_CLIS (and allowed in policy.toml); each opens in a terminal in the folder, on its own.
+_AGENT_WORDS = {"claude": "claude", "claude code": "claude", "antigravity": "antigravity", "anti gravity": "antigravity", "agy": "antigravity"}
+_AGENT = r"(?P<ag>claude(?:\s+code)?|anti ?gravity|agy)(?:\s+(?:cli|session|instance|env|environment|agent|terminal|window))*"
+_AGENT_GO = r"(?:open|launch|start|init\w*|inti\w*|run|fire up|spin up|boot up|set up|begin)(?: up)?"
+# What can trail the agent's name: "initialized", "started up" (and the ways Whisper and fingers spell them), then "in the terminal".
+_AGENT_STATE = r"(?:\s+(?:init\w*|inti\w*|start\w*|launch\w*|runn?ing|open\w*|ready|loaded|up|going|active))*"
+_AGENT_TERM = rf"(?:\s+(?:in|inside|on|within|using|through)\s+(?:an?\s+|the\s+|new\s+)*{_TERM}(?:\s+window)?)?"
+_AGENT_WORD = re.compile(r"\b(?:claude|anti ?gravity|agy)\b")
+
+
+def _coding_cli_command(t: str) -> FastMatch | None:
+    def made(n: str, ag: str) -> FastMatch | None:
+        n = n.strip(" .,-_")
+        if not n or n in _NOT_A_FOLDER or _REFERENT.search(n) or _CHATTY_OPEN.match(n):
+            return None
+        return FastMatch("open_project", {"name": n, "how": "terminal", "agent": _AGENT_WORDS[re.sub(r"\s+", " ", ag)]}, "project_agent")
+
+    tail = _AGENT_STATE + _AGENT_TERM
+    m = (re.search(_PRE + rf"{_AGENT_GO}\s+(?:an?\s+|the\s+|new\s+|my\s+)*{_AGENT}{tail}\s+(?:in|inside|within|for|at|on|from)\s+"
+                   rf"(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}{_AGENT_TERM}" + _POST, t)
+         or re.search(_PRE + rf"{_AGENT_GO}\s+(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}{_AGENT_TERM}\s+(?:in|with|using|inside)\s+"
+                      rf"(?:an?\s+|the\s+|new\s+)*{_AGENT}{tail}" + _POST, t))
+    return made(m["n"], m["ag"]) if m else None
+
+
+def _project_command(t: str) -> FastMatch | None:
+    def made(n: str, how: str, env: str | None = None) -> FastMatch | None:
+        n = n.strip(" .,-_")
+        if not n or n in _NOT_A_FOLDER or _REFERENT.search(n) or _CHATTY_OPEN.match(n):
+            return None
+        if _AGENT_WORD.search(n):         # "GNSS with claude code ..." that the agent matcher didn't take is not a folder name; the model decides
+            return None
+        a: dict[str, Any] = {"name": n, "how": how}
+        if env and env not in ("the", "a", "it", "that"):
+            a["env"] = env
+        return FastMatch("open_project", a, "project")
+
+    if ag := _coding_cli_command(t):
+        return ag
+    go = r"(?:open|launch|start|load|pull up|bring up)(?: up)?"
+    m = (re.search(_PRE + rf"{go}\s+(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}\s+(?:in|with|using|inside)\s+(?:an?\s+|the\s+)?"
+                   rf"(?:new\s+)?{_EDITOR}(?:\s+window)?" + _POST, t)
+         or re.search(_PRE + rf"{go}\s+(?:an?\s+)?(?:new\s+)?{_EDITOR}(?:\s+window)?\s+(?:with|for|in|at|on)\s+(?:my\s+|the\s+)?"
+                      rf"(?P<n>{_FNAME}){_FWORD}{_DRIVE}" + _POST, t))
+    if m:
+        return made(m["n"], "vscode")
+    m = (re.search(_PRE + rf"{go}\s+(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}\s+(?:in|with|using|inside)\s+(?:an?\s+|the\s+)?"
+                   rf"(?:new\s+)?{_TERM}(?:\s+window)?{_ENVTAIL}" + _POST, t)
+         or re.search(_PRE + rf"{go}\s+(?:an?\s+|the\s+)?(?:new\s+)?{_TERM}(?:\s+window)?\s+(?:in|at|for|from|on)\s+(?:my\s+|the\s+)?"
+                      rf"(?P<n>{_FNAME}){_FWORD}{_DRIVE}{_ENVTAIL}" + _POST, t))
+    if m:
+        return made(m["n"], "terminal", m["env"])
+    m = (re.search(_PRE + rf"(?:go to|go into|get into|cd (?:in)?to|navigate to|switch to)\s+(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}"
+                   rf"(?:\s+(?:in|using|with)\s+(?:an?\s+|the\s+)?{_TERM})?(?:\s*,\s*|\s+)(?:and\s+|then\s+)*"
+                   r"(?:activate|activating)\s+(?:the\s+)?(?:conda\s+)?(?P<env>[a-z0-9_-]{1,30})(?:\s+(?:conda\s+)?(?:environment|env))?" + _POST, t))
+    if m:
+        return made(m["n"], "terminal", m["env"])
+    m = (re.search(_PRE + rf"(?:open|show|pull up|bring up)(?: me)?\s+(?:my\s+|the\s+)?(?P<n>{_FNAME})\s+(?:folder|directory)"
+                   rf"{_DRIVE}(?:\s+(?:in|using)\s+(?:file )?explorer)?" + _POST, t)
+         or re.search(_PRE + rf"(?:open|show|pull up|bring up)(?: me)?\s+(?:my\s+|the\s+)?(?P<n>{_FNAME}){_FWORD}{_DRIVE}\s+(?:in|using)\s+"
+                      r"(?:the\s+)?(?:file )?explorer" + _POST, t))
+    if m:
+        return made(m["n"], "folder")
+    if "," in t:             # "so with the powershell you opened, go into EV_AI and activate ev": only the last clause is the request
+        tail = t.rsplit(",", 1)[-1].strip()
+        if tail:
+            return _project_command(tail)
+    return None
+
+
+# "what's the time", "tell me the current time and date", "what is the date and time", "whats the date today", "can u tell me
+# what day it is". Answered by get_time_date; never sent to a web search (that is how EV once reported the wrong date).
+_TD = r"(?:current\s+)?(?:time|date|day)(?:\s+(?:and|&)\s+(?:the\s+)?(?:current\s+)?(?:time|date|day))?"
+_TIME_Q = re.compile(
+    _PRE + rf"(?:(?:what(?:'s|s| is)?|tell me|give me|show me|do you know)\s+(?:the\s+)?{_TD}"
+    r"|what\s+(?:time|day|date)\s+(?:it\s+)?is(?:\s+it)?(?:\s+today)?"
+    r"|what(?:'s|s| is)?\s+today'?s\s+date"
+    rf"|(?:the\s+)?current\s+(?:time|date|day)(?:\s+(?:and|&)\s+(?:the\s+)?current\s+(?:time|date|day))?)"
+    r"(?:\s+(?:is it|right now|now|today|at the moment))*" + _POST)
+
+
+# "play it", "can u play it", "play that again", "play the same song on spotify", "search it on youtube": the thing meant is
+# what EV last opened or searched, which the model can't see (it only keeps the words of earlier turns), so it is resolved here.
+_REF = (r"(?:it|that|this|the same(?: (?:song|video|track|thing|one))?|same(?: (?:song|video|track|thing|one))|"
+        r"(?:that|this|the) (?:song|video|track|one))")
+
+
+def _follow_up(t: str, last: dict[str, Any] | None) -> FastMatch | None:
+    if not last or last.get("tool") != "open_website":
+        return None
+    prev = last.get("args") or {}
+    q = str(prev.get("query", "")).strip()
+    if not q:
+        return None
+    m = re.search(_PRE + rf"(?P<v>play|watch|search(?: for)?|find|look up)\s+{_REF}(?:\s+(?:again|now|please))?"
+                  rf"(?:\s+(?:on|in|at)\s+(?:the\s+)?(?P<site>{_SITE}))?" + _POST, t)
+    if not m:
+        return None
+    site = canonical_site(m["site"] or str(prev.get("site", "")))
+    if not site:
+        return None
+    a: dict[str, Any] = {"site": site, "query": q}
+    if m["v"] in ("play", "watch") and site == "youtube":
+        a["play"] = True
+    return FastMatch("open_website", a, "follow_up")
+
+
+def match_fast(text: str, last: dict[str, Any] | None = None) -> FastMatch | None:
+    """`last` is what EV last did ({"tool", "args", "message"}), so "play it" can mean the song it just searched for."""
     orig = re.sub(r"\s+", " ", text.strip())
     t = orig.lower()
     t = re.sub(r"[.?!]+\s+(?=[a-z])", ", ", t)       # Whisper punctuates "open firefox? open youtube and ..." as sentences
 
-    if re.search(_PRE + r"(what(?:'s| is)? the time|what time is it|what(?:'s| is)? the date(?: today)?|what day is it(?: today)?|what(?:'s| is)? today'?s date|tell me the time|what(?:'s| is)? the (?:current )?time(?: right now| now)?)" + _POST, t):
+    if _TIME_Q.search(t):
         return FastMatch("get_time_date", {}, "time")
+
+    follow = _follow_up(t, last)
+    if follow:
+        return follow
+    proj = _project_command(t)
+    if proj:
+        return proj
 
     m = re.search(_PRE + r"(?:set|start|create)\s+(?:a |an )?(?:(\w+) )?timer (?:for|of)\s+" + _NUM + r"\s*" + _UNIT + _POST, t)
     if m:
@@ -446,11 +641,15 @@ def match_fast(text: str) -> FastMatch | None:
         r"(?: again| now)?" + _POST, t):
         return FastMatch("open_file", {"which": "last"}, "open_file")
 
+    t_open = _ASK_ADMIN.sub("", t)                    # "open cmd as admin" -> open "cmd" with admin=True (the gate asks for a yes)
     m = re.search(_PRE + r"(?:open|launch|start|run)(?: up)?\s+(?:the )?(?:app )?([a-z0-9 .+-]{2,40}?)(?: app| application| browser)?"
-                  r"(?:\s+(?:in|on) (?:my |the )?(?:pc|computer|laptop|machine|system))?(?: for me)?(?: right now| now)?" + _POST, t)
+                  r"(?:\s+(?:in|on) (?:my |the )?(?:pc|computer|laptop|machine|system))?(?: for me)?(?: right now| now)?" + _POST, t_open)
     if (m and not re.match(r"(a |an )?(timer|reminder)", m.group(1)) and not _CHATTY_OPEN.match(m.group(1))
             and not _REFERENT.search(m.group(1))):
-        return FastMatch("open_app", {"name": m.group(1).strip()}, "open")
+        open_args: dict[str, Any] = {"name": m.group(1).strip()}
+        if t_open != t:
+            open_args["admin"] = True
+        return FastMatch("open_app", open_args, "open")
 
     _where = r"(?: in here| right now| a bit| a little)?"
     if re.search(
@@ -510,11 +709,30 @@ def is_stop(text: str) -> bool:
     return bool(_STOP.match(text))
 
 
+# "Dismissed": the whole utterance, nothing else. EV drops the conversation without a word and says nothing more until it is
+# woken (the wake word or hotkey in the voice app; its name in the text REPL). Whisper writes it a few ways.
+_DISMISS = re.compile(
+    r"^\W*(?:(?:hey|ok|okay|please)\W+)?(?:" + _NAME_W + r"\W+)?(?:(?:you(?:'re|\s+are)\s+)?dismissed|dismiss(?:\s+(?:it|yourself|now))?|"
+    r"dismiss(?:ed)?\s+(?:" + _NAME_W + r"))\W*$", re.I)
+_WAKE_NAME = re.compile(r"^\W*(?:(?:hey|hi|ok|okay|oh)\W+)?" + _NAME_W + r"\b\W*(?P<rest>.*)$", re.I | re.S)
+
+
+def is_dismiss(text: str) -> bool:
+    return bool(_DISMISS.match(text))
+
+
+def wake_remainder(text: str) -> str | None:
+    """For the text REPL, which has no wake word: what follows EV's name ("hey evie, what time is it" -> "what time is it", "evie" -> ""),
+    or None when the line doesn't start with the name."""
+    m = _WAKE_NAME.match(text)
+    return m["rest"].strip() if m else None
+
+
 # ---- several things in one breath ("open Spotify and turn the volume down"): each clause is matched on its own and they run
 # in order. Only tools that are plain commands qualify: nothing that carries free text (a note, a reminder, typing), nothing that
 # needs the model afterwards (a search), and nothing that clicks or types on a screen.
-_COMPOUND_OK = frozenset({"open_app", "open_website", "close_app", "set_volume", "media_control", "set_timer", "take_screenshot",
-                          "get_time_date", "list_reminders", "open_dashboard", "set_display_mode"})
+_COMPOUND_OK = frozenset({"open_app", "open_website", "open_project", "close_app", "set_volume", "media_control", "set_timer", "take_screenshot",
+                          "get_time_date", "list_reminders", "open_dashboard", "set_display_mode", "trust_agent_folder"})
 _SPLIT = re.compile(r"\s*(?:,\s*)?(?:\b(?:and then|and also|and|then|also|after that|plus)\b|,)\s+")
 _LEAD_VERB = re.compile(_PRE + r"(?P<v>open|launch|start|close|quit)\b")
 
@@ -528,7 +746,11 @@ def match_compound(text: str) -> list[FastMatch] | None:
     out: list[FastMatch] = []
     verb = ""
     for i, part in enumerate(parts):
+        if _ENV_ONLY.match(part):
+            return None                  # "... in the terminal and activate ev" is one request (the single-command pattern reads it)
         fm = match_fast(part)
+        if fm is None and _OWN_VERB.match(part):
+            return None                  # "open spotify and play despacito": "play ..." is its own request, not an app name
         if fm is None and verb:
             fm = match_fast(f"{verb} {part}")           # "open notepad and calculator": the verb carries over
         if fm is None or fm.then_llm or fm.tool not in _COMPOUND_OK:

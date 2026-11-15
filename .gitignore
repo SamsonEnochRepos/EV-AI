@@ -80,3 +80,6 @@ EV-Vault/
 
 # --- Fine-tuning data is your conversations: never commit it (scripts/finetune/export_data.py writes here)
 data/training/
+
+# --- A research-skill folder dropped into the repo root (not part of EV)
+wisdom/

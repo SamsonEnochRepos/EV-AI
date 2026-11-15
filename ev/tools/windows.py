@@ -139,6 +139,64 @@ def match(name: str, wins: list[Win]) -> list[Win]:
     return hits
 
 
+BROWSER_STEMS = frozenset(_BROWSERS)
+_BROWSER_WORDS = frozenset({"browser", "web browser", "the browser", "internet", "internet browser", "my browser"})
+_PREVIOUS_WORDS = frozenset({"previous", "last", "back", "previous window", "last window", "previous app", "last app",
+                             "the previous window", "the last window", "other window", "the other window"})
+_NEVER_SWITCH_TO = frozenset({"python", "pythonw"})      # EV's own overlay, never "the previous window"
+
+
+def is_previous_word(name: str) -> bool:
+    return _norm(name) in _PREVIOUS_WORDS
+
+
+def is_private_browser_window(w: Win) -> bool:
+    return w.exe in _BROWSERS and ("private browsing" in w.title.lower() or "inprivate" in w.title.lower()
+                                   or "incognito" in w.title.lower())
+
+
+def browser_windows(wins: list[Win], fg: Win | None) -> list[Win]:
+    """Browser windows, front-most first. A private window is left out unless it is the one the user is already in."""
+    return [w for w in wins if w.exe in _BROWSERS and (not is_private_browser_window(w) or (fg is not None and w.hwnd == fg.hwnd))]
+
+
+def pick_for_focus(name: str, wins: list[Win], fg: Win | None) -> Win | None:
+    """The window "switch to X" means: an app by name (VS Code, Firefox), "the browser", or "the previous window".
+
+    `wins` is in Z-order (front first), so the first hit is the one used most recently. A window that is already in front
+    is passed over when another one of the same app exists, so "switch to Firefox" from a second Firefox window goes to the first."""
+    k = _norm(name)
+    if k in _PREVIOUS_WORDS:
+        return next((w for w in wins if (fg is None or w.hwnd != fg.hwnd) and w.exe not in _NEVER_SWITCH_TO), None)
+    hits = browser_windows(wins, fg) if k in _BROWSER_WORDS else match(name, wins)
+    hits = [w for w in hits if w.exe not in _NEVER_SWITCH_TO and not is_private_browser_window(w)] or [
+        w for w in hits if w.exe not in _NEVER_SWITCH_TO]
+    others = [w for w in hits if fg is None or w.hwnd != fg.hwnd]
+    chosen = others or hits
+    return chosen[0] if chosen else None
+
+
+def bring_to_front(w: Win) -> bool:
+    """Make `w` the foreground window. Windows only lets the program that last received input take focus, so this joins the
+    current foreground window's input queue for the moment (the usual way; it sends no keystrokes, so nothing is typed or opened).
+    True if the window really is in front afterwards."""
+    u = _user32()
+    if u.IsIconic(w.hwnd):
+        u.ShowWindow(w.hwnd, 9)                                   # SW_RESTORE
+    fg = u.GetForegroundWindow()
+    me = ctypes.windll.kernel32.GetCurrentThreadId()
+    fg_tid = int(u.GetWindowThreadProcessId(fg, None)) if fg else 0
+    attached = bool(fg_tid) and fg_tid != me and bool(u.AttachThreadInput(me, fg_tid, True))
+    try:
+        u.BringWindowToTop(w.hwnd)
+        u.SetForegroundWindow(w.hwnd)
+    finally:
+        if attached:
+            u.AttachThreadInput(me, fg_tid, False)
+    time.sleep(0.12)
+    return int(u.GetForegroundWindow()) == w.hwnd
+
+
 def own_pids() -> set[int]:
     """EV, what launched it (the terminal it runs in) and its own Python helpers (the overlay).
 

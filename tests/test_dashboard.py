@@ -408,11 +408,12 @@ def test_a_voice_that_fails_to_load_leaves_the_old_one_speaking(backend, monkeyp
     monkeypatch.setattr(backend, "_piper_voices", lambda: ["en_US-amy-medium"])
     monkeypatch.setattr("ev.dashboard.backend.make_engine", lambda *_a, **_k: SimpleNamespace(name="piper"))
     old = backend.app.speaker.engine
+    before = backend.app.cfg["tts"]["piper_voice"]      # whatever this machine has (ev.local.toml may override the default)
     backend.app.speaker.fail = True
     with pytest.raises(DashboardError) as e:
         backend.set_voice("piper", "en_US-amy-medium", 1.0, False, True)
     assert e.value.status == 422 and backend.app.speaker.engine is old
-    assert backend.app.cfg["tts"]["piper_voice"] == "en_US-hfc_female-medium" and not backend.local_file.exists()
+    assert backend.app.cfg["tts"]["piper_voice"] == before and not backend.local_file.exists()
 
 
 def test_a_voice_that_is_not_installed_or_a_silly_speed_is_refused(backend, monkeypatch):

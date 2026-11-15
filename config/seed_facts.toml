@@ -8,8 +8,8 @@
 # Everything below comes from things the user said about themself (the original persona, and their messages to Claude about
 # their projects, portfolio and preferences). Nothing is guessed. Keep each value under 200 characters: facts go in the prompt.
 [facts]
-name = "Samson, goes by Sam"
-signs_off_as = "Samson, in emails and documents"
+name = "Samson, goes by Sam; signs emails and documents as Samson"
+preferred_name = "boss"
 country = "India"
 student = "a college student who takes part in hackathons"
 hackathon_wins = "Smart India Hackathon 2025 national winner, HackIndia Spark 1 winner, HackIndia national finalist and second runner up"
@@ -23,6 +23,9 @@ explain_style = "likes plain-language explanations in short paragraphs, and want
 wants_from_evie = "wants Evie to sound human with short natural replies, plan the day, remind, help with projects, and later take phone calls and warn about problems in live apps"
 assistant_name = "the assistant is called EV and her name is Evie; never spell it Eevee"
 values = "cares a lot about privacy and about making things work well on modest hardware"
-laptop = "Ryzen 5 7535HS, about 7 GB RAM, RTX 3050 with 4 GB VRAM, Windows 10 Home"
+laptop = "Ryzen 5 7535HS, 24 GB RAM, RTX 3050 with 4 GB VRAM, 1 TB SSD (the D: drive), Windows 11 Home"
+d_drive = "D: is the main work drive: every code project is a folder inside D:\\Projects (CLM_MVP, EV_AI, EZConverter, WriteRightAI, HydroVision...); games are in D:\\Games"
+conda_envs = "Miniconda is on C: (C:\\Users\\samso\\miniconda3). Environments: aidetector, er, ev, ml, paddleocr, sih26168, torch, voice-agent. EV runs in env ev, from D:\\Projects\\EV_AI"
+browser = "Firefox with two profiles: the personal one (shown as SamsonPC) for music, videos and everyday browsing, and Agents for coding agents; no longer uses Chrome"
 interests = "[FILL IN]"
 not_to_confuse = "Suryaprasanth is a different person; never attribute his work, skills or projects to Sam"

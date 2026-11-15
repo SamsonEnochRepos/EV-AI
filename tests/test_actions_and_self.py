@@ -163,6 +163,42 @@ def test_stop_words_are_a_command_not_a_question():
         assert not is_stop(t), t
 
 
+def test_dismissed_is_a_command_only_as_a_whole_utterance():
+    from ev.llm.fastpath import is_dismiss, wake_remainder
+
+    for t in ["Dismissed", "dismissed.", "Evie, dismissed", "hey evie dismissed", "You're dismissed", "dismissed Evie", "Dismiss"]:
+        assert is_dismiss(t), t
+    for t in ["the meeting was dismissed", "dismissed the notification", "why was the case dismissed", "stop", "what does dismissed mean"]:
+        assert not is_dismiss(t), t
+    assert wake_remainder("hey Evie, what time is it") == "what time is it" and wake_remainder("Evie") == ""
+    assert wake_remainder("what time is it") is None and wake_remainder("every day") is None
+
+
+def test_the_repl_stays_silent_after_dismissed_until_the_name(monkeypatch, capsys, cfg):
+    import ev.repl as repl
+
+    said: list[str] = []
+
+    class FakeBrain:
+        def respond(self, text, on_sentence=None, **kw):
+            said.append(text)
+            return type("R", (), {"timings": {}, "fast_path": False, "tool_log": []})()
+
+        def finish_session(self):
+            return False
+
+    class FakeSched:
+        start = stop = lambda self: None  # noqa: E731
+
+    monkeypatch.setattr(repl, "build_brain", lambda *a, **k: (FakeBrain(), FakeSched()))
+    monkeypatch.setattr(repl, "setup_logging", lambda *a, **k: None)
+    lines = iter(["hello there", "dismissed", "what time is it", "tell me a joke", "hey evie, open notepad", "quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(lines))
+    assert repl.run_repl(cfg) == 0
+    assert said == ["hello there", "open notepad"]                 # nothing reached the model while dismissed
+    assert "ev>" not in capsys.readouterr().out
+
+
 def test_tab_phrasings_are_left_to_the_model_and_window_switches_match():
     assert match_fast("close the tab") is None and match_fast("switch to the firefox browser").args == {"title": "firefox"}
     from ev.stt.whisper import fix_names

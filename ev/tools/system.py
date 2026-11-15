@@ -28,6 +28,8 @@ KNOWN_APPS: dict[str, list[str]] = {
     "settings": ["explorer.exe", "ms-settings:"],
     "task manager": ["taskmgr.exe"],
     "terminal": ["wt.exe"], "windows terminal": ["wt.exe"],
+    "cmd": ["cmd.exe"], "command prompt": ["cmd.exe"],
+    "powershell": ["powershell.exe"], "windows powershell": ["powershell.exe"],
     "edge": ["msedge.exe"], "microsoft edge": ["msedge.exe"],
     "chrome": ["chrome.exe"], "google chrome": ["chrome.exe"],
     "firefox": ["firefox.exe"],
@@ -35,6 +37,8 @@ KNOWN_APPS: dict[str, list[str]] = {
     "word": ["winword.exe"], "excel": ["excel.exe"], "powerpoint": ["powerpnt.exe"],
 }
 
+_CONSOLE_EXES = frozenset({"cmd.exe", "powershell.exe"})
+_NEW_CONSOLE = 0x00000010      # CREATE_NEW_CONSOLE
 _APP_PATHS = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
 _FUZZY_CUTOFF = 0.85          # tolerate speech-recognition slips ("spotifi", "note pad") but not unrelated names
 
@@ -208,6 +212,94 @@ def open_path(path: str) -> None:
     os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
 
 
+# ---- folders: "open CLM in VS Code", "open the Riot Games folder", "open EV_AI in a terminal with the ev environment"
+_FOLDER_WORDS = re.compile(r"\s+(?:project|folder|directory|repo|repository)$")
+_ENV_NAME = re.compile(r"[A-Za-z0-9_-]{1,40}")
+
+
+def _folder_key(name: str) -> str:
+    """"CLM_MVP" and "clm mvp" and "Clm-MVP" all become "clm mvp"."""
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+def list_folders(roots: list[Path], skip: frozenset[str]) -> dict[str, Path]:
+    """The folders directly inside each root, by spoken-style name. Symlinks, junctions, hidden and `skip` names are left out.
+    An earlier root wins when two folders have the same name. A root that isn't there (a drive that isn't mounted) is ignored."""
+    out: dict[str, Path] = {}
+    for root in roots:
+        try:
+            kids = sorted(root.iterdir())
+        except OSError:
+            continue
+        for p in kids:
+            if p.name.startswith((".", "$")) or p.name.lower() in skip:
+                continue
+            try:
+                if p.is_symlink() or getattr(p, "is_junction", lambda: False)() or not p.is_dir():
+                    continue
+            except OSError:
+                continue
+            if key := _folder_key(p.name):
+                out.setdefault(key, p)
+    return out
+
+
+def find_folder(name: str, roots: list[Path], skip: frozenset[str] = frozenset()) -> Path | None:
+    """The folder a spoken name means: exact first, then whole-word containment ("clm" -> CLM_MVP), then a close spelling."""
+    want = _folder_key(_FOLDER_WORDS.sub("", name.strip().lower()))
+    return _match(list_folders(roots, skip), want, True) if want else None  # type: ignore[no-any-return]
+
+
+# Coding-agent CLIs a terminal may start: spoken name -> (program on PATH, what EV calls it). The program is fixed here, never
+# taken from speech or config, and nothing is passed to it, so it opens at its own prompt and waits for the user.
+AGENT_CLIS: dict[str, tuple[str, str]] = {
+    "claude": ("claude", "Claude Code"),
+    "antigravity": ("agy", "Antigravity"),
+}
+
+
+def open_folder(how: str, path: Path, env: str = "", agent: str = "") -> None:
+    """Open `path` in VS Code, File Explorer or a new terminal. Everything started here is built from a fixed program name,
+    the folder, and (for a terminal) `conda activate <env>` with an env name that has passed _ENV_NAME and the policy list,
+    or one of the fixed coding-agent programs in AGENT_CLIS. No shell string is built and nothing the user said reaches a
+    command line except those checked names."""
+    if agent:
+        if how != "terminal" or env or agent not in AGENT_CLIS:
+            raise ValueError("a coding agent starts only in a terminal, on its own")
+        prog, label = AGENT_CLIS[agent]
+        if not shutil.which(prog):
+            raise FileNotFoundError(f"I couldn't find {label} on this PC")
+        # -NoProfile: the user's profile (conda init, prompt theme) takes several seconds and the agent needs none of it; the
+        # program is found through the PATH Windows already gives every process.
+        shell = [resolve_exe("powershell.exe") or "powershell.exe", "-NoProfile", "-NoExit", "-Command", prog]
+        wt = resolve_exe("wt.exe")
+        if wt:
+            subprocess.Popen([wt, "-d", str(path), *shell], close_fds=True)  # noqa: S603
+        else:
+            subprocess.Popen(shell, cwd=str(path), close_fds=True, creationflags=_NEW_CONSOLE)  # noqa: S603
+        return
+    if how == "folder":
+        os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+    elif how == "vscode":
+        code = resolve_exe("Code.exe")
+        if not code:
+            raise FileNotFoundError("I couldn't find VS Code on this PC")
+        subprocess.Popen([code, "--new-window", str(path)], close_fds=True)  # noqa: S603
+    elif how == "terminal":
+        if env and not _ENV_NAME.fullmatch(env):
+            raise ValueError("bad environment name")
+        # the user's PowerShell profile runs `conda init`, so "conda activate" is a plain command there (no ; needed, which
+        # Windows Terminal would read as its own separator)
+        shell = [resolve_exe("powershell.exe") or "powershell.exe", "-NoExit", *(["-Command", f"conda activate {env}"] if env else [])]
+        wt = resolve_exe("wt.exe")
+        if wt:
+            subprocess.Popen([wt, "-d", str(path), *shell], close_fds=True)  # noqa: S603
+        else:
+            subprocess.Popen(shell, cwd=str(path), close_fds=True, creationflags=_NEW_CONSOLE)  # noqa: S603
+    else:
+        raise ValueError("unknown way to open a folder")
+
+
 def launch_app(name: str, allow_start_menu: bool = True, elevate: bool = False) -> str:
     """Launch an app by friendly name. Returns a short description of what was launched.
 
@@ -233,7 +325,9 @@ def _launch(name: str, allow_start_menu: bool, elevate: bool) -> str:
             if elevate:
                 _run_elevated(exe, " ".join(argv[1:]) or None)
             else:
-                subprocess.Popen([exe, *argv[1:]], close_fds=True)  # noqa: S603
+                # a console program started from a console would share EV's own window: give it a new one
+                flags = _NEW_CONSOLE if argv[0].lower() in _CONSOLE_EXES else 0
+                subprocess.Popen([exe, *argv[1:]], close_fds=True, creationflags=flags)  # noqa: S603
             return key
         # not installed under that exe name: fall through to Start-menu resolution
     if allow_start_menu:

@@ -29,7 +29,7 @@ from ev.dashboard.hub import Hub
 from ev.dashboard.server import DashboardServer
 from ev.llm.brain import Brain
 from ev.llm.client import LLMError, OllamaClient, OllamaDown
-from ev.llm.fastpath import is_stop
+from ev.llm.fastpath import is_dismiss, is_stop
 from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.overlay.client import OverlayClient
@@ -359,6 +359,7 @@ class EVApp:
             self.wake.stop()
         self._mic_permanent = False
         self._close_shared_mic()
+        self.brain.finish_session()          # a short session would otherwise leave no summary behind
         self.scheduler.stop()
         if self.dashboard:
             self.dashboard.stop()
@@ -624,7 +625,7 @@ class EVApp:
             log.exception("could not check whether EV was addressed")
             return False
         why = ""
-        ok = bool(_ADDRESSED.match(said)) or is_stop(said)          # a bare "stop" / "be quiet" is never anything but a command
+        ok = bool(_ADDRESSED.match(said)) or is_stop(said) or is_dismiss(said)   # a bare "stop" / "be quiet" / "dismissed" is only a command
         if ok:
             why = "starts with its name"
         else:
@@ -737,6 +738,12 @@ class EVApp:
             log.info("nothing more was said; answering the held request: %s", held)
         if is_stop(text):                                 # "Evie stop": silence, not a question for the model (it used to answer with nonsense)
             log.info("stop command (%r): staying quiet", text)
+            if self.speaker:
+                self.speaker.stop()
+            self.sm.to(State.IDLE, force=True)
+            return None
+        if is_dismiss(text):                              # "Dismissed": no reply at all; the conversation ends and only the wake word/hotkey starts the next
+            log.info("dismissed (%r): going quiet until woken", text)
             if self.speaker:
                 self.speaker.stop()
             self.sm.to(State.IDLE, force=True)

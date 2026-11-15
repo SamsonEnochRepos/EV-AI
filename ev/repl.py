@@ -7,6 +7,7 @@ from ev.core.config import Config
 from ev.core.log import setup_logging
 from ev.llm.brain import Brain
 from ev.llm.client import OllamaClient
+from ev.llm.fastpath import is_dismiss, wake_remainder
 from ev.memory.migrations import open_vault, seed_from_persona
 from ev.memory.store import MemoryStore
 from ev.safety.gate import SafetyGate, parse_yes_no
@@ -25,6 +26,12 @@ def build_brain(cfg: Config, memory: MemoryStore, ask=None, model: str | None = 
     if index:
         index.refresh()                      # the REPL doesn't run the background poller
     registry = build_tools(ToolContext(cfg, memory, sched, policy, vault=vault, index=index, turn=turn))
+    try:                                      # the same voice-routed window and tab tools the app has, so they can be tried by text
+        from ev.control.tools import register_control_tools
+
+        register_control_tools(registry, cfg, policy, gate)
+    except Exception as e:                    # noqa: BLE001  (a missing UIA library must not stop the REPL)
+        print(f"[repl] window and tab switching unavailable: {e}")
     client = OllamaClient(cfg)
     if model:
         client.model = model
@@ -42,6 +49,7 @@ def run_repl(cfg: Config, debug: bool = False) -> int:
     brain, sched = build_brain(cfg, memory, ask)
     sched.start()
     print("EV dev REPL. Ctrl+C or 'quit' to exit.")
+    asleep = False
     try:
         while True:
             try:
@@ -52,12 +60,27 @@ def run_repl(cfg: Config, debug: bool = False) -> int:
                 break
             if not text:
                 continue
+            if asleep:                                    # dismissed: not a word until the line starts with EV's name
+                rest = wake_remainder(text)
+                if rest is None:
+                    continue
+                asleep = False
+                if not rest:
+                    print("ev> I'm here.")
+                    continue
+                text = rest
+            elif is_dismiss(text):
+                asleep = True
+                print("[dismissed: silent until a line starts with 'evie']")
+                continue
             res = brain.respond(text, on_sentence=lambda s: print("ev>", s))
             if debug:
                 print(f"   [{res.timings} fast={res.fast_path} tools={[t['tool'] for t in res.tool_log]}]")
     except KeyboardInterrupt:
         pass
     finally:
+        if brain.finish_session():
+            print("[memory] saved a summary of this chat")
         sched.stop()
         memory.close()
     return 0

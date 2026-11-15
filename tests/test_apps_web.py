@@ -172,7 +172,7 @@ def test_force_close_terminates_the_matching_processes(registry, fake_windows):
 # ---- open_website tool
 def test_open_website_tool(registry, monkeypatch):
     opened = []
-    monkeypatch.setattr(web, "open_url", lambda url, browser="": opened.append((url, browser)))
+    monkeypatch.setattr(web, "open_url", lambda url, browser="", profile="": opened.append((url, browser)))
     r = registry.get("open_website").func(site="youtube", query="latest tech video", browser="firefox")
     assert r.ok and r.message == "Searched YouTube for latest tech video in firefox."
     assert opened[0][1] == "firefox" and "search_query=latest+tech+video" in opened[0][0]

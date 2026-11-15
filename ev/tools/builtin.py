@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ev.core.config import Config
+from ev.core.log import get_logger
 from ev.memory.store import MemoryStore
 from ev.memory.vault import Vault, VaultError
 from ev.memory.vault_index import VaultIndex
@@ -19,6 +20,8 @@ from ev.safety.provenance import SOURCE_SAID, TurnState
 from . import system, weather, web, windows
 from .base import Tool, ToolRegistry, ToolResult
 from .scheduler import Scheduler
+
+log = get_logger("tools")
 
 
 @dataclass
@@ -65,6 +68,29 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
             return ToolResult(False, f"I couldn't start {name}: {e.strerror or type(e).__name__}.")
         return ToolResult(True, f"Opened {launched}" + (" as administrator." if admin else "."))
 
+    def open_project(name: str, how: str = "folder", env: str = "", agent: str = "") -> ToolResult:
+        pol = ctx.policy
+        path = system.find_folder(name, pol.project_roots, pol.project_skip)
+        if path is None:
+            return ToolResult(False, f"I couldn't find a folder called {name.strip()} on your drives.")
+        if env and (how != "terminal" or env not in pol.conda_envs):          # policy already checked; the tool doesn't trust it
+            return ToolResult(False, "I can only activate an environment from my list, in a terminal.")
+        if agent and (how != "terminal" or env or agent not in pol.coding_agents or agent not in system.AGENT_CLIS):
+            return ToolResult(False, "I can only start a coding agent from my list, in a terminal on its own.")
+        try:
+            system.open_folder(how, path, env, agent)
+        except FileNotFoundError as e:
+            return ToolResult(False, str(e))
+        except (OSError, ValueError) as e:
+            return ToolResult(False, f"I couldn't open {path.name}: {getattr(e, 'strerror', None) or e}.")
+        where = {"vscode": "in VS Code", "terminal": "in a terminal", "folder": "in File Explorer"}[how]
+        said = f"Opened {path.name} {where}"
+        if agent:
+            said += f" and asked it to start {system.AGENT_CLIS[agent][1]}"      # same: it may still be loading or ask to sign in
+        if env:
+            said += f" and asked it to activate {env}"          # can't be seen from here, so say only what was asked
+        return ToolResult(True, said + ".", {"name": path.name, "how": how})
+
     def open_file(path: str = "", which: str = "") -> ToolResult:
         target = path.strip()
         if not target:
@@ -87,20 +113,36 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
             return ToolResult(False, f"I couldn't open it: {e.strerror or type(e).__name__}.")
         return ToolResult(True, f"Opened the {kind}." if kind else "Opened the file.", {"path": str(p)})
 
-    def open_website(site: str = "", query: str = "", url: str = "", browser: str = "") -> ToolResult:
+    def open_website(site: str = "", query: str = "", url: str = "", browser: str = "", play: bool = False) -> ToolResult:
         target = web.build_url(site, query, url)
         if target is None:
             return ToolResult(False, "That doesn't look like a website I can open.")
+        key = web.canonical_site(site)
+        q = query.strip()
+        wants_video = bool(play and q and not url and key == "youtube")
+        video = None
+        if wants_video and ctx.cfg["web"].get("enabled", True):
+            video = web.resolve_first_video(q, float(ctx.cfg["web"].get("timeout_s", 8)))
+        where = f" in {browser}" if browser else ""                       # only a browser the user named is spoken
+        use, profile = browser, ""
+        if not browser and not url and key in _MEDIA_SITES and (media := ctx.cfg["web"].get("media_browser", "")):
+            use, profile = str(media), str(ctx.cfg["web"].get("media_profile", ""))   # music and video go to the personal profile
         try:
-            web.open_url(target, browser)
+            web.open_url(video or target, use, profile)
         except FileNotFoundError as e:
             return ToolResult(False, str(e))
-        except OSError as e:
-            return ToolResult(False, f"I couldn't open the browser: {e.strerror or type(e).__name__}.")
-        label = _SITE_LABELS.get(web.canonical_site(site), web.host_of(target).removeprefix("www."))
-        where = f" in {browser}" if browser else ""
-        if query.strip() and not url:
-            return ToolResult(True, f"Searched {label} for {query.strip()}{where}.")
+        except (OSError, ValueError) as e:
+            return ToolResult(False, f"I couldn't open the browser: {getattr(e, 'strerror', None) or type(e).__name__}.")
+        label = _SITE_LABELS.get(key, web.host_of(target).removeprefix("www."))
+        if video:
+            # EV can't see the page, and browsers often block autoplay on a tab you haven't clicked, so it only says it opened it
+            return ToolResult(True, f"Opened the top YouTube result for {q}{where}. If it's paused, your browser blocked autoplay, so press play.",
+                              {"query": q})
+        if wants_video:           # said honestly: nothing was picked, the user is looking at search results
+            return ToolResult(True, f"I couldn't pick a video, so I searched YouTube for {q}{where}.", {"query": q})
+        if q and not url:
+            tail = " Spotify won't start a song from a link, so press play on the one you want." if key == "spotify" else ""
+            return ToolResult(True, f"Searched {label} for {q}{where}.{tail}", {"query": q})
         return ToolResult(True, f"Opened {label}{where}.")
 
     def close_app(name: str, force: bool = False) -> ToolResult:
@@ -223,14 +265,26 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
         hit = searches.get(key)
         if hit and time.monotonic() - hit[0] < float(web.get("cache_s", 600)):
             return _search_result(hit[1])
-        # backend pinned: ddgs "auto" fans out to Bing/Brave/Google/Yahoo/..., but only DuckDuckGo is allowed
-        text_search = [lambda d: d.text(query, max_results=n, backend="duckduckgo")] * 3
-        news_search = [lambda d: d.news(query, max_results=n, backend="duckduckgo")]
+        # Backends are named one at a time, never ddgs "auto" (which fans out to every engine). DuckDuckGo goes first; the
+        # engines after it in [web] backends_text / backends_news are tried only if it errors (it serves a bot check to some
+        # networks), so a query reaches them only then. An empty list means DuckDuckGo alone.
+        text_be = [str(b) for b in web.get("backends_text") or ["duckduckgo"]]
+        news_be = [str(b) for b in web.get("backends_news") or ["duckduckgo"]]
+
+        def text_try(be: str, **kw: Any) -> Callable[[Any], Any]:
+            return lambda d: d.text(query, max_results=n, backend=be, **kw)
+
+        def news_try(be: str) -> Callable[[Any], Any]:
+            return lambda d: d.news(query, max_results=n, backend=be)
+
+        text_search = [text_try(text_be[0]), text_try(text_be[0])] + [_fallback(text_try(b)) for b in text_be[1:]]
+        news_search = [news_try(news_be[0])] + [_fallback(news_try(b)) for b in news_be[1:]]
         # Text search ranks evergreen pages (last year's storm, a Wikipedia stub), and the model can't tell they are old.
         # For anything recent, ask for the past week first, then dated news, then the past month.
-        recent_search = [lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="w"), news_search[0],
-                         lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="w"),
-                         lambda d: d.text(query, max_results=n, backend="duckduckgo", timelimit="m")]
+        recent_search = ([text_try(text_be[0], timelimit="w"), news_try(news_be[0])]
+                         + [_fallback(text_try(b, timelimit="w")) for b in text_be[1:]]
+                         + [_fallback(news_try(b)) for b in news_be[1:]]
+                         + [text_try(text_be[0], timelimit="w"), text_try(text_be[0], timelimit="m")])
         rows = _first_rows(
             recent_search if _RECENT.search(query) else text_search + news_search,
             lambda: DDGS(timeout=web["timeout_s"]), pause_s=float(web.get("retry_pause_s", 1.5)))
@@ -306,14 +360,23 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
                       {"name": {"type": S, "description": "App name, e.g. Spotify", "maxLength": 60},
                        "admin": {"type": "boolean"}},
                       open_app, ("name",), timeout_s=20, direct=True))
+    reg.register(Tool("open_project", "Open a folder from the user's D drive (a project or game) by name, in vscode, a file "
+                      "explorer window (folder) or a terminal. env only with terminal. agent starts that coding CLI in a terminal.",
+                      {"name": {"type": S, "description": "folder name, e.g. CLM_MVP", "maxLength": 60},
+                       "how": {"type": S, "enum": ["vscode", "folder", "terminal"]},
+                       "env": {"type": S, "description": "conda environment to activate", "maxLength": 30},
+                       "agent": {"type": S, "enum": ["claude", "antigravity"]}},
+                      open_project, ("name",), timeout_s=15, direct=True))
     reg.register(Tool("open_file", "Open the last screenshot or note EV saved (which=last), or a file path the user gave.",
                       {"which": {"type": S, "enum": ["last"]}, "path": {"type": S, "maxLength": 300}},
                       open_file, timeout_s=15, direct=True, llm_visible=False))      # voice-routed: costs the model no prompt
-    reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one.",
-                      {"site": {"type": S, "description": "youtube, github, a domain...", "maxLength": 60},
+    reg.register(Tool("open_website", "Open a website, or search one, in the browser. Set browser only if the user names one. "
+                      "play=true with site youtube and a query starts the top video.",
+                      {"site": {"type": S, "description": "youtube, spotify, github, a domain...", "maxLength": 60},
                        "query": {"type": S, "maxLength": 200},
                        "url": {"type": S, "description": "only if the user gave an address", "maxLength": 500},
-                       "browser": {"type": S, "maxLength": 20}},
+                       "browser": {"type": S, "maxLength": 20},
+                       "play": {"type": "boolean"}},
                       open_website, timeout_s=15, direct=True))
     reg.register(Tool("close_app", "Close an app by name, or 'this' for the front window. force only for force quit or kill.",
                       {"name": {"type": S, "maxLength": 60},
@@ -359,11 +422,18 @@ def build_tools(ctx: ToolContext, reg: ToolRegistry | None = None) -> ToolRegist
     return reg
 
 
+_MEDIA_SITES = frozenset({"youtube", "spotify"})     # opened in [web] media_browser / media_profile when the user names no browser
 _MEDIA_SAID = {"play_pause": "Okay, toggled playback.", "next": "Skipping ahead.", "previous": "Going back a track.",
                "stop": "Stopped."}
 _SITE_LABELS = {"youtube": "YouTube", "github": "GitHub", "gmail": "Gmail", "linkedin": "LinkedIn", "maps": "Google Maps",
                 "stackoverflow": "Stack Overflow", "duckduckgo": "DuckDuckGo", "twitter": "X", "google": "Google",
-                "wikipedia": "Wikipedia", "reddit": "Reddit", "amazon": "Amazon"}
+                "wikipedia": "Wikipedia", "reddit": "Reddit", "amazon": "Amazon", "spotify": "Spotify"}
+
+
+def _fallback(attempt: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Mark an attempt as a different search engine from the one before it: no pause first."""
+    attempt.fallback = True  # type: ignore[attr-defined]
+    return attempt
 
 
 def _first_rows(attempts: list[Callable[[Any], Any]], make_client: Callable[[], Any], pause_s: float = 1.0
@@ -375,13 +445,14 @@ def _first_rows(attempts: list[Callable[[Any], Any]], make_client: Callable[[], 
     """
     errored = 0
     for k, attempt in enumerate(attempts):
-        if k:
-            time.sleep(pause_s * k)
+        if k and not getattr(attempt, "fallback", False):
+            time.sleep(pause_s)                  # a retry of the same engine waits; a different engine is tried at once
         try:
             with make_client() as d:
                 rows = [r for r in attempt(d) if r.get("title") or r.get("body")]
-        except Exception:
+        except Exception as e:                  # noqa: BLE001  (every engine error means "try the next one")
             errored += 1
+            log.warning("web search attempt %d of %d failed: %s: %s", k + 1, len(attempts), type(e).__name__, str(e)[:160])
             continue
         if rows:
             return rows

@@ -92,6 +92,68 @@ def elements(win: Any, limit: int = MAX_ELEMENTS) -> list[UIElement]:
     return out
 
 
+def window_for(hwnd: int):  # noqa: ANN201
+    from pywinauto import Desktop
+
+    return Desktop(backend="uia").window(handle=hwnd)
+
+
+def terminal_text(hwnd: int, limit: int = 20000) -> str:
+    """The text showing in a Windows Terminal window (its TermControl exposes it through UIA's TextPattern), or "" when it can't
+    be read. Read-only; the caller decides what the words mean."""
+    try:
+        for ctl in window_for(hwnd).descendants(class_name="TermControl"):
+            return str(ctl.iface_text.DocumentRange.GetText(limit))
+    except Exception as e:  # noqa: BLE001  (no UIA, a closed window or a terminal that hides its text: nothing to read)
+        log.info("could not read terminal text: %s", e)
+    return ""
+
+
+def browser_tabs(win: Any) -> list[UIElement]:
+    """The tabs along the top of a browser window, left to right. A browser also reports tab lists that belong to the page it
+    is showing (a web app's own tabs), so only the items in the same row as the first one count."""
+    try:
+        items = win.descendants(control_type="TabItem")
+    except Exception as e:
+        log.warning("UIA tab list failed: %s", e)
+        return []
+    out: list[UIElement] = []
+    row: tuple[int, int] | None = None
+    for d in items:
+        try:
+            info = d.element_info
+            r = info.rectangle
+            if r.width() <= 0 or r.height() <= 0:
+                continue
+            if row is None:
+                row = (r.top, r.bottom)
+            elif (r.top, r.bottom) != row:
+                continue
+            out.append(UIElement(str(info.name or "").strip(), "TabItem", (r.left, r.top, r.right, r.bottom), False, d))
+        except Exception:  # noqa: S112
+            continue
+    return out
+
+
+def find_tab(tabs: list[UIElement], name: str) -> UIElement | None:
+    """The tab the user means by a few words of its title: all the words must appear, the shortest title wins ("youtube" picks
+    the tab called YouTube over one that merely mentions it in a long page title)."""
+    words = [w for w in name.lower().split() if w]
+    if not words:
+        return None
+    hits = [t for t in tabs if all(w in t.name.lower() for w in words)]
+    return min(hits, key=lambda t: len(t.name)) if hits else None
+
+
+def select_tab(tab: UIElement) -> bool:
+    """Switch to a tab through its own "select" action; a click at its position is only the fallback."""
+    try:
+        tab.wrapper.iface_selection_item.Select()
+        return True
+    except Exception:
+        return False
+
+
 def find_element(items: list[UIElement], name: str) -> UIElement | None:
     n = name.lower().strip()
     exact = [e for e in items if e.name.lower() == n]

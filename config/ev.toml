@@ -66,7 +66,7 @@ engine = "piper"               # "piper" | "kokoro"; piper (hfc_female) is the m
 piper_voice = "en_US-hfc_female-medium"
 piper_voice_dir = "models/piper"
 length_scale = 1.0
-kokoro_voice = "af_heart"
+kokoro_voice = "af_heart"      # one voice, or a blend such as "af_heart:60,af_bella:40" (up to four, weights add up to 100%). bf_* / bm_* are British
 kokoro_dir = "models/kokoro"
 kokoro_speed = 1.05            # a touch brisker than default sounds more conversational
 first_chunk_min_chars = 12
@@ -179,7 +179,16 @@ debug_save_screenshots = false
 enabled = true
 max_results = 4
 timeout_s = 8
-retry_pause_s = 1.5            # DuckDuckGo sometimes serves a bot check; wait this long (x attempt) before retrying
+retry_pause_s = 1.5            # DuckDuckGo sometimes serves a bot check; wait this long before retrying it
+# Music and video (YouTube, Spotify) open in this browser and Firefox profile, so they land in your personal profile and not the
+# agent one. The profile is the Name in %APPDATA%\Mozilla\Firefox\profiles.ini ("default-release" is the profile the window
+# list calls SamsonPC). "" = use the system default browser. A browser you name aloud ("in Chrome") wins over this.
+media_browser = "firefox"
+media_profile = "default-release"
+# DuckDuckGo always goes first. The engines after it are tried only when it errors (a bot check or block), and then the query
+# is sent to them too. Put just "duckduckgo" in a list (or leave it empty) to keep every query on DuckDuckGo.
+backends_text = ["duckduckgo", "yahoo"]
+backends_news = ["duckduckgo", "bing"]
 cache_s = 600                  # repeat searches within this many seconds are answered from memory
 weather_enabled = true         # live weather via Open-Meteo (sends only the city name); false = DuckDuckGo only
 units = "metric"               # "metric" (Celsius) | "imperial" (Fahrenheit)
